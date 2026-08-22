@@ -1,10 +1,13 @@
 import { epocaDe, expiraDe, piezasDeEpoca, nombrePieza, HEX_POR_FRAGMENTO,
          PIEZAS_POR_LLAVE, DUR_EPOCA_MS } from './epoca.mjs';
-import { ejecutarEnSala, salaConfigurada, SALA_NO_CONECTADA, LIMITES } from './sala.mjs';
+import { ejecutarEnSala, salaConfigurada, LIMITES } from './sala.mjs';
+import { leerForwarded, informeFuente, textoRecibo } from './recibo.mjs';
 
 const BASE = 'https://icca-engine.com/corpus/';
 const LENGUAJES = new Set(['python', 'javascript']);
 const RE_LLAVE = /^[0-9a-f]{64}$/;
+// Descubrimiento de la licencia por cabecera, como pide RSL 1.0 seccion 4.
+const LICENCIA_URL = 'https://icca-engine.com/license.xml';
 
 // --- fragmentos -------------------------------------------------------------
 // fragmento(pieza) = HMAC-SHA256(SECRETO, "pieza-NN")[0..16 hex]
@@ -117,13 +120,23 @@ export default {
     // Un guard va donde tiene algo que proteger: el presupuesto protege gasto
     // de computo, y sin proveedor conectado NO HAY computo que gastar, asi que
     // ahi bloquearia sin proteger nada. Reordenar esto rompe la fase molinete.
+    //
+    // Y devuelve 200, NO 501. Medido el 2026-08-22 en el FAQ de Cloudflare Pay
+    // Per Crawl: las respuestas de error no se facturan. Un 501 es semantica
+    // HTTP correcta y valor cero. La fase molinete entrega contenido real
+    // (metodo licenciado + informe determinista de la fuente) y declara adentro
+    // que no hubo ejecucion, con su motivo. El limite se declara, no se
+    // disimula, y ademas se cobra.
     if (!salaConfigurada(env)) {
-      return txt(`PUERTA ABIERTA, SALA NO CONECTADA.
-
-Tu llave es valida (epoca ${epocaOk}). La verificacion funciono.
-El ejecutor todavia no esta enchufado: esta es la fase molinete.
-Si llegaste hasta aca, el mecanismo de llave-por-lectura funciona.
-`, 501);
+      const informe = await informeFuente(fuente, l);
+      const forwarded = leerForwarded(req.headers.get('forwarded'));
+      return txt(textoRecibo({ epoca: epocaOk, informe, forwarded }), 200, {
+        'x-icca-epoca': String(epocaOk),
+        'x-icca-ejecutada': 'no',
+        'x-icca-operador': forwarded.operador || 'sin_declarar',
+        'x-icca-uso': forwarded.uso || forwarded.estado,
+        link: `<${LICENCIA_URL}>; rel="license"; type="application/rsl+xml"`
+      });
     }
 
     // GUARD 7 - presupuesto. Solo aca hay computo real que proteger.
