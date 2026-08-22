@@ -1,0 +1,61 @@
+name: kiosco
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kiosco
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Los tests de logica NO necesitan dependencias: usan solo la libreria
+      # estandar de Node. Corren primero porque dan el diagnostico mas rapido.
+      - name: tests de logica
+        run: node --test test/*.test.mjs
+
+      # El paso que hace que el de arriba signifique algo: rompe el codigo a
+      # proposito y EXIGE que la suite se ponga roja. Incluye los sabotajes de
+      # NEGOCIO, que son los que un test de formato no ve.
+      - name: sabotaje obligatorio
+        run: bash tools/sabotaje.sh
+
+      - name: el arbol quedo limpio despues del sabotaje
+        run: git diff --exit-code
+
+      # ESTE ES EL TESTIGO INDEPENDIENTE del protocolo MCP.
+      # El entorno donde se escribio el codigo no tiene red ni npm, asi que
+      # todo lo que dependa del SDK era NO MEDIDO ahi. Aca se instalan los
+      # paquetes reales y se hace un handshake completo: initialize,
+      # tools/list y tools/call. Si el SDK v2 no fuera compatible con el
+      # handler stateless, falla aca y no en produccion.
+      - name: instalar dependencias reales
+        run: npm install --no-audit --no-fund
+
+      - name: test del protocolo MCP real
+        run: node --test test-integracion/*.test.mjs
+
+      # Lo mas cerca del deploy sin desplegar: wrangler valida la config,
+      # arma el bundle y resuelve las dependencias.
+      - name: dry-run del deploy
+        run: npx wrangler deploy --dry-run --outdir=/tmp/kiosco-build
+
+      # El limite de un Worker en el plan gratis es 3 MB. Si el bundle se
+      # acerca, conviene saberlo antes de que el deploy lo rechace.
+      - name: tamano del bundle
+        run: |
+          set -euo pipefail
+          bytes=$(find /tmp/kiosco-build -name '*.js' -exec cat {} + | wc -c)
+          echo bundle en bytes: $bytes
+          if [ $bytes -gt 2500000 ]; then
+            echo FALLA: el bundle supera 2,5 MB y el limite del plan gratis es 3 MB
+            exit 1
+          fi
