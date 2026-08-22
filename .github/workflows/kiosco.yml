@@ -36,6 +36,10 @@ jobs:
     env:
       PASO: ${{ github.workspace }}/.github/scripts/paso.sh
       NOMBRE_SUITE: kiosco
+      # 30 lineas alcanzaban para UN test de node --test con su stack, y el run
+      # 7 fallo con SEIS: cinco quedaron fuera de la ventana. El numero anterior
+      # lo elegi sin medir cuanto ocupa un fallo.
+      LINEAS_ANOTADAS: '200'
     defaults:
       run:
         working-directory: kiosco
@@ -59,13 +63,15 @@ jobs:
       - name: 03 el arbol quedo limpio despues del sabotaje
         run: bash "$PASO" correr 03-arbol 'git diff --exit-code'
 
-      # RESOLUCION ANTES DE INSTALAR. agents 0.21.0 pide como peers NO
-      # opcionales @modelcontextprotocol/sdk 1.30.0 y
-      # @modelcontextprotocol/client 2.0.0, y el package.json no declara
-      # ninguno de los dos. Verificado en vivo el 2026-08-22 en
-      # registry.npmjs.org: los rangos de zod son compatibles, asi que no hay
-      # conflicto evidente. "No evidente" no es "medido": esto lo mide, y su
-      # salida queda en la anotacion si falla.
+      # RESOLUCION ANTES DE INSTALAR.
+      #
+      # MEDIDO EN EL RUN 7, y descarta la sospecha que estaba escrita aca:
+      # agents 0.21.0 pide como peers NO opcionales @modelcontextprotocol/sdk
+      # 1.30.0 y @modelcontextprotocol/client 2.0.0, y el package.json del
+      # kiosco no declara ninguno de los dos. Igual npm los resuelve solo: este
+      # paso y el 05 dieron exit 0. La hipotesis era razonable y es FALSA.
+      # El paso se queda igual, porque su valor ahora es de regresion: si un dia
+      # la resolucion se rompe, se ve aca y no dentro del install.
       - name: 04 resolucion de dependencias, sin escribir nada
         run: bash "$PASO" correr 04-resolucion 'npm install --dry-run --no-audit --no-fund'
 
@@ -77,10 +83,10 @@ jobs:
       - name: 06 versiones que quedaron instaladas
         run: bash "$PASO" correr 06-versiones 'npm ls --depth=0 || true; npm ls @modelcontextprotocol/server @modelcontextprotocol/sdk zod agents || true'
 
-      # ESTE ES EL TESTIGO INDEPENDIENTE del protocolo MCP. El entorno donde se
-      # escribio el codigo no tiene red ni npm, asi que todo lo que dependa del
-      # SDK era NO MEDIDO ahi. Aca se hace el handshake completo: initialize,
-      # tools/list y tools/call.
+      # ESTE ES EL TESTIGO INDEPENDIENTE del protocolo MCP, y ya cobro: en el
+      # run 7 se puso rojo con 6 de 12 tests fallando, sobre un servidor que
+      # localmente daba 74 tests verdes. Ninguna lectura de documentacion
+      # hubiera encontrado eso.
       - name: 07 test del protocolo MCP real
         run: bash "$PASO" correr 07-protocolo 'node --test test-integracion/*.test.mjs'
 
