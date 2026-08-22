@@ -1,13 +1,37 @@
 name: puerta
 
+# El disparo era push a '**' MAS pull_request: dos corridas identicas por cada
+# commit de una rama con PR. Ahora corre una vez por PR, y en push solo sobre
+# main.
 on:
-  push:
-    branches: ['**']
   pull_request:
+    paths:
+      - 'puerta/**'
+      - '.github/workflows/ci.yml'
+      - '.github/scripts/paso.sh'
+  push:
+    branches: [main]
+    paths:
+      - 'puerta/**'
+      - '.github/workflows/ci.yml'
+      - '.github/scripts/paso.sh'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: puerta-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  verificar:
+  puerta:
+    # El nombre del job ES el nombre del check run: con los dos workflows
+    # llamando "verificar" a su job, el estado del commit era ilegible.
+    name: puerta
     runs-on: ubuntu-latest
+    env:
+      DIR_PASOS: ${{ runner.temp }}/pasos-puerta
+      PASO: ${{ github.workspace }}/.github/scripts/paso.sh
     defaults:
       run:
         working-directory: puerta
@@ -19,18 +43,21 @@ jobs:
 
       # Sin npm install: la suite y el preflight usan SOLO la libreria estandar
       # de Node. wrangler se instala recien al desplegar.
-      - name: tests
-        run: node --test test/*.test.mjs
+      - name: 01 tests
+        run: bash "$PASO" correr 01-tests 'node --test test/*.test.mjs'
 
-      - name: preflight
-        run: node preflight.mjs
+      - name: 02 preflight
+        run: bash "$PASO" correr 02-preflight 'node preflight.mjs'
 
-      # El paso que hace que los dos de arriba signifiquen algo: rompe el
-      # codigo a proposito y EXIGE que la suite se ponga roja.
-      # Se invoca con bash porque la API de GitHub sube los archivos sin bit
-      # ejecutable: './tools/sabotaje.sh' daria permission denied.
-      - name: sabotaje obligatorio
-        run: bash ./tools/sabotaje.sh
+      # El paso que hace que los dos de arriba signifiquen algo: rompe el codigo
+      # a proposito y EXIGE que la suite se ponga roja. Se invoca con bash
+      # porque la API de GitHub sube los archivos sin bit ejecutable.
+      - name: 03 sabotaje obligatorio
+        run: bash "$PASO" correr 03-sabotaje 'bash ./tools/sabotaje.sh'
 
-      - name: el arbol quedo limpio despues del sabotaje
-        run: git diff --exit-code
+      - name: 04 el arbol quedo limpio despues del sabotaje
+        run: bash "$PASO" correr 04-arbol 'git diff --exit-code'
+
+      - name: cierre publico del run
+        if: always()
+        run: bash "$PASO" cierre 01-tests 02-preflight 03-sabotaje 04-arbol
