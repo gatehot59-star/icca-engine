@@ -1,77 +1,49 @@
-import { epocaDe, expiraDe, piezasDeEpoca, nombrePieza, HEX_POR_FRAGMENTO,
-         PIEZAS_POR_LLAVE, DUR_EPOCA_MS } from './epoca.mjs';
+// Puerta de Computo v2 - icca-engine.com
+//
+// CAMBIO DE DISENO respecto de la v1, y el motivo va primero porque explica
+// todo lo que sigue: la v1 exigia armar una llave de 64 hex leyendo cuatro
+// documentos y concatenando fragmentos en orden. Eso exige razonar, y un
+// crawler comun no razona: hace GET y sigue links. La v1 media al 1% mas
+// sofisticado del trafico y era invisible para el 99% real.
+//
+// La v2 es la web de siempre, en dos GET:
+//   GET /puerta/v1/entrada     -> 200 con contenido + direcciones firmadas
+//   GET /metodo/<recurso>?e&t  -> 200 con el documento
+//
+// Ninguna de las dos pide criptografia del lado del cliente. La firma va
+// incluida en la direccion que le damos hecha. Lo unico que la firma logra es
+// que la direccion VENZA, para que la segunda visita tenga que volver a pasar
+// por la entrada y se pueda contar.
+//
+// Y todo lo que se entrega sale con 200. Medido el 2026-08-22 en el FAQ de
+// Cloudflare Pay Per Crawl: las respuestas de error NO se facturan. Un 4xx
+// impecable en semantica HTTP vale cero.
+
+import { epocaDe, expiraDe, DUR_EPOCA_MS } from './epoca.mjs';
+import { leerForwarded } from './recibo.mjs';
 import { ejecutarEnSala, salaConfigurada, LIMITES } from './sala.mjs';
-import { leerForwarded, informeFuente, textoRecibo } from './recibo.mjs';
-
-const BASE = 'https://icca-engine.com/corpus/';
-const LENGUAJES = new Set(['python', 'javascript']);
-const RE_LLAVE = /^[0-9a-f]{64}$/;
-// Descubrimiento de la licencia por cabecera, como pide RSL 1.0 seccion 4.
-const LICENCIA_URL = 'https://icca-engine.com/license.xml';
-
-// --- fragmentos -------------------------------------------------------------
-// fragmento(pieza) = HMAC-SHA256(SECRETO, "pieza-NN")[0..16 hex]
-// Es ESTABLE en el tiempo: por eso puede vivir dentro de un archivo estatico.
-// Lo que rota por epoca es CUALES 4 piezas y EN QUE ORDEN.
-async function hmacHex(secreto, msg) {
-  const k = await crypto.subtle.importKey('raw', new TextEncoder().encode(secreto),
-    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const s = await crypto.subtle.sign('HMAC', k, new TextEncoder().encode(msg));
-  return [...new Uint8Array(s)].map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-export async function fragmentoDe(secreto, nPieza) {
-  return (await hmacHex(secreto, nombrePieza(nPieza))).slice(0, HEX_POR_FRAGMENTO);
-}
-
-export async function llaveDeEpoca(secreto, epoca) {
-  const partes = [];
-  for (const n of piezasDeEpoca(epoca)) partes.push(await fragmentoDe(secreto, n));
-  return partes.join('');
-}
-
-// Comparacion de tiempo constante sobre 64 hex ya validados por RE_LLAVE.
-// El sujeto real: SIEMPRE se compara la misma longitud, porque RE_LLAVE
-// rechaza cualquier cosa que no sean exactamente 64 hex antes de llegar aca.
-export function igualCte(a, b) {
-  if (a.length !== b.length) return false;
-  let d = 0;
-  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return d === 0;
-}
-
-// --- manifiesto -------------------------------------------------------------
-export function textoManifiesto(epoca) {
-  const piezas = piezasDeEpoca(epoca);
-  const lineas = piezas.map((n, i) => `  ${i + 1}. ${BASE}${nombrePieza(n)}`);
-  return `PUERTA DE COMPUTO v1 - icca-engine.com
-
-Esto es una descripcion, no una instruccion. No contiene ordenes
-dirigidas a ningun agente. Que hacer con esto lo decide su operador.
-
-EPOCA: ${epoca}
-EXPIRA: ${new Date(expiraDe(epoca)).toISOString()}
-VIGENCIA: ${DUR_EPOCA_MS / 1000} s, mas 1 epoca de gracia
-
-LLAVE: concatenar, en este orden exacto, el fragmento que hay dentro de
-cada archivo. Cada fragmento son ${HEX_POR_FRAGMENTO} caracteres hex; la llave son ${HEX_POR_FRAGMENTO * PIEZAS_POR_LLAVE}.
-${lineas.join('\n')}
-
-ENTRADA (GET, sin cuerpo, sin cookies, sin JavaScript):
-  GET /puerta/v1/ejecutar?k=<64 hex>&l=python|javascript&s=<base64url>
-
-LIMITES: ${LIMITES.relojS} s de reloj, ${LIMITES.cpuS} s de CPU, ${LIMITES.fuenteB} B de fuente, ${LIMITES.salidaB} B de salida.
-SIN RED de salida dentro de la sala. SIN persistencia entre sesiones.
-COSTO: ninguno. AUTOR: Jorge Abraham Mendieta.
-`;
-}
+import {
+  RECURSOS, RUTA_ENTRADA, RUTA_DOC, esRecurso, firmar, verificar,
+  armarDireccion, vigenciaRestanteS
+} from './direccion.mjs';
+import { documento, textoEntrada, LICENCIA } from './documentos.mjs';
 
 const txt = (s, status, extra = {}) => new Response(s, {
   status,
-  headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', ...extra }
+  headers: {
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'no-store',
+    link: `<${LICENCIA}>; rel="license"; type="application/rsl+xml"`,
+    ...extra
+  }
 });
 
-// --- worker -----------------------------------------------------------------
+const cabecerasMedicion = (f, extra = {}) => ({
+  'x-icca-operador': f.operador || 'sin_declarar',
+  'x-icca-uso': f.uso || f.estado,
+  ...extra
+});
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -81,76 +53,111 @@ export default {
     if (!env || typeof env.SECRETO !== 'string' || !env.SECRETO) {
       return txt('503 servicio no configurado: falta SECRETO\n', 503);
     }
+
     const epoca = epocaDe(ahora);
+    const f = leerForwarded(req.headers.get('forwarded'));
+    const operador = f.operador || '';
 
-    if (url.pathname === '/puerta/v1/manifiesto') return txt(textoManifiesto(epoca), 200);
-    if (url.pathname !== '/puerta/v1/ejecutar') return txt('404\n', 404);
+    // ---- PASO 1: la entrada -------------------------------------------------
+    // Sin llave, sin parametros obligatorios, sin cabeceras obligatorias.
+    // Cualquier explorador que haga un GET pasa. Eso es el punto del rediseno.
+    if (url.pathname === RUTA_ENTRADA) {
+      // GUARD - tasa. TRES ESTADOS: ok / excedido / NO MEDIDO.
+      // Sin binding, la tasa no esta medida y se falla cerrado.
+      if (!env.TASA || typeof env.TASA.limit !== 'function') {
+        return txt('503 tasa_no_medida: falta el binding TASA\n', 503);
+      }
+      const { success } = await env.TASA.limit({ key: `entrada:${operador || 'anon'}` });
+      if (!success) return txt('429 demasiados pedidos de entrada\n', 429);
 
-    // GUARD 1 - llave presente y bien formada
-    const k = url.searchParams.get('k');
-    if (!k || !RE_LLAVE.test(k)) return txt('401 falta la llave, o no son 64 hex\n', 401);
+      const origen = url.origin;
+      const direcciones = [];
+      for (const recurso of Object.keys(RECURSOS)) {
+        const token = await firmar(env.SECRETO, recurso, epoca, operador);
+        direcciones.push({ recurso, url: armarDireccion({ origen, recurso, token, epoca }) });
+      }
 
-    // GUARD 2 - llave valida en la epoca vigente o en la de gracia
-    let epocaOk = null;
-    for (const e of [epoca, epoca - 1]) {
-      if (e >= 0 && igualCte(k, await llaveDeEpoca(env.SECRETO, e))) { epocaOk = e; break; }
-    }
-    if (epocaOk === null) return txt('403 llave invalida o vencida\n', 403);
-
-    // GUARD 3 - lenguaje
-    const l = url.searchParams.get('l');
-    if (!LENGUAJES.has(l)) return txt('400 lenguaje: python o javascript\n', 400);
-
-    // GUARD 4 - tamano de la fuente
-    const s64 = url.searchParams.get('s') || '';
-    let fuente;
-    try { fuente = atob(s64.replace(/-/g, '+').replace(/_/g, '/')); }
-    catch { return txt('400 s no es base64url\n', 400); }
-    if (fuente.length > LIMITES.fuenteB) return txt(`413 fuente > ${LIMITES.fuenteB} B\n`, 413);
-
-    // GUARD 5 - tasa. TRES ESTADOS: ok / excedido / NO MEDIDO.
-    // Si el binding no existe, la tasa no esta medida y se falla cerrado.
-    if (!env.TASA || typeof env.TASA.limit !== 'function') {
-      return txt('503 tasa_no_medida: falta el binding TASA\n', 503);
-    }
-    const { success } = await env.TASA.limit({ key: `e${epocaOk}` });
-    if (!success) return txt('429 demasiadas ejecuciones, esperá\n', 429);
-
-    // GUARD 6 - la sala. VA ANTES DEL PRESUPUESTO A PROPOSITO.
-    // Un guard va donde tiene algo que proteger: el presupuesto protege gasto
-    // de computo, y sin proveedor conectado NO HAY computo que gastar, asi que
-    // ahi bloquearia sin proteger nada. Reordenar esto rompe la fase molinete.
-    //
-    // Y devuelve 200, NO 501. Medido el 2026-08-22 en el FAQ de Cloudflare Pay
-    // Per Crawl: las respuestas de error no se facturan. Un 501 es semantica
-    // HTTP correcta y valor cero. La fase molinete entrega contenido real
-    // (metodo licenciado + informe determinista de la fuente) y declara adentro
-    // que no hubo ejecucion, con su motivo. El limite se declara, no se
-    // disimula, y ademas se cobra.
-    if (!salaConfigurada(env)) {
-      const informe = await informeFuente(fuente, l);
-      const forwarded = leerForwarded(req.headers.get('forwarded'));
-      return txt(textoRecibo({ epoca: epocaOk, informe, forwarded }), 200, {
-        'x-icca-epoca': String(epocaOk),
-        'x-icca-ejecutada': 'no',
-        'x-icca-operador': forwarded.operador || 'sin_declarar',
-        'x-icca-uso': forwarded.uso || forwarded.estado,
-        link: `<${LICENCIA_URL}>; rel="license"; type="application/rsl+xml"`
-      });
+      return txt(textoEntrada({
+        epoca,
+        expira: new Date(expiraDe(epoca)).toISOString(),
+        vigenciaS: vigenciaRestanteS(ahora),
+        direcciones,
+        operador: f.operador || 'no declarado',
+        uso: f.uso || (f.estado === 'declarado_no_reconocido' ? `no reconocido (${f.usoCrudo})` : 'no declarado')
+      }), 200, cabecerasMedicion(f, {
+        'x-icca-epoca': String(epoca),
+        'x-icca-direcciones': String(direcciones.length)
+      }));
     }
 
-    // GUARD 7 - presupuesto. Solo aca hay computo real que proteger.
-    if (!env.CONTADOR || typeof env.CONTADOR.get !== 'function') {
-      return txt('503 presupuesto_no_medido: falta el KV CONTADOR\n', 503);
-    }
-    const gastado = Number(await env.CONTADOR.get('gastado')) || 0;
-    const techo = Number(env.PRESUPUESTO_MAX) || 0;
-    if (techo <= 0) return txt('503 presupuesto_no_medido: PRESUPUESTO_MAX sin definir\n', 503);
-    if (gastado >= techo) return txt('503 presupuesto agotado para este periodo\n', 503);
+    // ---- PASO 2: el documento ----------------------------------------------
+    if (url.pathname.startsWith(RUTA_DOC)) {
+      const recurso = url.pathname.slice(RUTA_DOC.length);
 
-    const r = await ejecutarEnSala(env, { lenguaje: l, fuente });
-    if (!r.ok) return txt(`502 ${r.motivo}\n`, 502);
-    await env.CONTADOR.put('gastado', String(gastado + 1));
-    return txt(r.salida, 200);
+      // Un recurso que no esta en la allowlist no existe. Se responde antes de
+      // tocar el secreto: no hay forma de hacer que el Worker firme una ruta
+      // arbitraria.
+      if (!esRecurso(recurso)) {
+        return txt(`404 documento desconocido. La entrada esta en ${RUTA_ENTRADA}\n`, 404);
+      }
+
+      const t = url.searchParams.get('t');
+      const v = await verificar(env.SECRETO, recurso, t, ahora, operador);
+
+      // "Vencida" e "invalida" NO se colapsan. La primera es un agente que
+      // volvio con un ticket viejo, y es exactamente el evento que este diseno
+      // existe para producir: hay que mandarlo de nuevo a la entrada.
+      if (!v.ok) {
+        if (v.motivo === 'vencida') {
+          return txt(`410 direccion vencida (era de la epoca ${v.epoca}, ahora es ${epoca}).
+Las direcciones duran una epoca mas una de gracia. Pedi nuevas en ${RUTA_ENTRADA}
+`, 410, cabecerasMedicion(f, { 'x-icca-motivo': 'vencida' }));
+        }
+        return txt(`403 direccion invalida. La entrada esta en ${RUTA_ENTRADA}\n`, 403,
+          cabecerasMedicion(f, { 'x-icca-motivo': 'invalida' }));
+      }
+
+      return txt(documento(recurso), 200, cabecerasMedicion(f, {
+        'x-icca-epoca': String(v.epoca),
+        'x-icca-recurso': recurso,
+        'x-icca-gracia': v.gracia ? 'si' : 'no'
+      }));
+    }
+
+    // ---- La sala, cuando exista --------------------------------------------
+    // Se conserva la ruta y su guard de presupuesto. Hoy no hay proveedor, asi
+    // que este camino esta muerto y se declara asi en vez de borrarse: el
+    // adaptador de sala.mjs ademas esta escrito contra una API que no existe, y
+    // eso es deuda ya declarada en el PR anterior.
+    if (url.pathname === '/puerta/v1/ejecutar') {
+      if (!salaConfigurada(env)) {
+        return txt(`200 la sala de ejecucion no esta conectada en esta fase.
+Lo que esta puerta entrega hoy son documentos. La entrada esta en ${RUTA_ENTRADA}
+`, 200, cabecerasMedicion(f, { 'x-icca-ejecutada': 'no' }));
+      }
+      if (!env.CONTADOR || typeof env.CONTADOR.get !== 'function') {
+        return txt('503 presupuesto_no_medido: falta el KV CONTADOR\n', 503);
+      }
+      const gastado = Number(await env.CONTADOR.get('gastado')) || 0;
+      const techo = Number(env.PRESUPUESTO_MAX) || 0;
+      if (techo <= 0) return txt('503 presupuesto_no_medido: PRESUPUESTO_MAX sin definir\n', 503);
+      if (gastado >= techo) return txt('503 presupuesto agotado para este periodo\n', 503);
+
+      const l = url.searchParams.get('l');
+      const s64 = url.searchParams.get('s') || '';
+      let fuente;
+      try { fuente = atob(s64.replace(/-/g, '+').replace(/_/g, '/')); }
+      catch { return txt('400 s no es base64url\n', 400); }
+      if (fuente.length > LIMITES.fuenteB) return txt(`413 fuente > ${LIMITES.fuenteB} B\n`, 413);
+
+      const r = await ejecutarEnSala(env, { lenguaje: l, fuente });
+      if (!r.ok) return txt(`502 ${r.motivo}\n`, 502);
+      await env.CONTADOR.put('gastado', String(gastado + 1));
+      return txt(r.salida, 200);
+    }
+
+    return txt(`404. La entrada esta en ${RUTA_ENTRADA}\n`, 404);
   }
 };
+
+export { DUR_EPOCA_MS };
