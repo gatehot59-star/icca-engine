@@ -8,12 +8,13 @@
 //
 // La v2 es la web de siempre, en dos GET:
 //   GET /puerta/v1/entrada     -> 200 con contenido + direcciones firmadas
-//   GET /metodo/<recurso>?e&t  -> 200 con el documento
+//   GET /puerta/v1/entrada?q=  -> 200 con los pasajes que responden la consulta
+//   GET /metodo/<recurso>?e&t  -> 200 con el documento completo
 //
-// Ninguna de las dos pide criptografia del lado del cliente. La firma va
-// incluida en la direccion que le damos hecha. Lo unico que la firma logra es
-// que la direccion VENZA, para que la segunda visita tenga que volver a pasar
-// por la entrada y se pueda contar.
+// Ninguna pide criptografia del lado del cliente. La firma va incluida en la
+// direccion que le damos hecha. Lo unico que la firma logra es que la direccion
+// VENZA, para que la segunda visita tenga que volver a pasar por la entrada y
+// se pueda contar.
 //
 // Y todo lo que se entrega sale con 200. Medido el 2026-08-22 en el FAQ de
 // Cloudflare Pay Per Crawl: las respuestas de error NO se facturan. Un 4xx
@@ -26,7 +27,13 @@ import {
   RECURSOS, RUTA_ENTRADA, RUTA_DOC, esRecurso, firmar, verificar,
   armarDireccion, vigenciaRestanteS
 } from './direccion.mjs';
-import { documento, textoEntrada, LICENCIA } from './documentos.mjs';
+import { documento, textoEntrada, textoRespuesta, corpusIndexable, LICENCIA } from './documentos.mjs';
+import { normalizarConsulta, construirIndice, buscar, pasajes, RESULTADOS_MAX } from './consulta.mjs';
+import { elegirDocumento, iaConfigurada } from './ia.mjs';
+
+// El indice se arma UNA VEZ por instancia del Worker, no por request: es
+// deterministico y no depende de la entrada.
+const INDICE = construirIndice(corpusIndexable());
 
 const txt = (s, status, extra = {}) => new Response(s, {
   status,
@@ -77,6 +84,43 @@ export default {
         direcciones.push({ recurso, url: armarDireccion({ origen, recurso, token, epoca }) });
       }
 
+      // ---- LA DUDA -------------------------------------------------------
+      // Si el agente pregunto algo, la entrada deja de ser un catalogo y pasa
+      // a ser una respuesta. Tres estados de la consulta, y los tres salen
+      // con 200 porque los tres entregan algo util:
+      //   sin_consulta -> el catalogo completo
+      //   ok           -> la respuesta con pasajes
+      //   rechazada    -> el catalogo, mas el motivo del rechazo declarado
+      const q = normalizarConsulta(url.searchParams.get('q'));
+
+      if (q.estado === 'ok') {
+        const ranking = buscar(q.terminos, INDICE);
+        const candidatos = ranking.slice(0, RESULTADOS_MAX);
+        const ids = candidatos.map(c => c.recurso);
+        const sel = await elegirDocumento(env, q.texto, ids, ids[0]);
+        const elegido = ranking.find(r => r.recurso === sel.recurso) || candidatos[0];
+        const dir = direcciones.find(d => d.recurso === elegido.recurso);
+
+        return txt(textoRespuesta({
+          consulta: q.texto,
+          elegido,
+          ranking: candidatos,
+          pasajes: pasajes(elegido.recurso, q.terminos, INDICE),
+          fuente: sel.fuente,
+          motivo: sel.motivo,
+          direccion: dir ? dir.url : origen + RUTA_ENTRADA,
+          epoca,
+          expira: new Date(expiraDe(epoca)).toISOString()
+        }), 200, cabecerasMedicion(f, {
+          'x-icca-epoca': String(epoca),
+          'x-icca-consulta': 'atendida',
+          'x-icca-recurso': elegido.recurso,
+          'x-icca-seleccion': sel.fuente,
+          'x-icca-ia': iaConfigurada(env) ? 'disponible' : 'sin_binding',
+          'x-icca-neuronas': String(sel.neuronas)
+        }));
+      }
+
       return txt(textoEntrada({
         epoca,
         expira: new Date(expiraDe(epoca)).toISOString(),
@@ -86,7 +130,9 @@ export default {
         uso: f.uso || (f.estado === 'declarado_no_reconocido' ? `no reconocido (${f.usoCrudo})` : 'no declarado')
       }), 200, cabecerasMedicion(f, {
         'x-icca-epoca': String(epoca),
-        'x-icca-direcciones': String(direcciones.length)
+        'x-icca-direcciones': String(direcciones.length),
+        'x-icca-consulta': q.estado === 'rechazada' ? `rechazada:${q.motivo}` : 'sin_consulta',
+        'x-icca-ia': iaConfigurada(env) ? 'disponible' : 'sin_binding'
       }));
     }
 
