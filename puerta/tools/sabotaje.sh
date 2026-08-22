@@ -7,9 +7,12 @@ cd "$(dirname "$0")/.."
 BAKD=$(mktemp); cp src/direccion.mjs "$BAKD"
 BAKI=$(mktemp); cp src/index.mjs "$BAKI"
 BAKM=$(mktemp); cp src/documentos.mjs "$BAKM"
+BAKC=$(mktemp); cp src/consulta.mjs "$BAKC"
+BAKA=$(mktemp); cp src/ia.mjs "$BAKA"
 restaurar(){
   cp "$BAKD" src/direccion.mjs; cp "$BAKI" src/index.mjs; cp "$BAKM" src/documentos.mjs
-  rm -f "$BAKD" "$BAKI" "$BAKM"
+  cp "$BAKC" src/consulta.mjs;  cp "$BAKA" src/ia.mjs
+  rm -f "$BAKD" "$BAKI" "$BAKM" "$BAKC" "$BAKA"
 }
 trap restaurar EXIT
 rojo(){ node --test test/*.test.mjs >/dev/null 2>&1 && echo verde || echo rojo; }
@@ -93,6 +96,63 @@ open(p,'w').write(s)
 PY
 r=$(rojo); echo "S7 tiempo constante -> $r (NO MEDIDO: la suite no mide tiempo)"
 cp "$BAKD" src/direccion.mjs
+
+# --- sabotajes de la DUDA y la IA -----------------------------------------
+
+# S8: el guard de caracteres de control se desactiva. ES EL SABOTAJE MAS
+# IMPORTANTE DE ESTE GRUPO, porque este guard YA ESTUVO ROTO una vez: escrito
+# como clase de caracteres en una regex, se corrompio al escribirse y dejaba
+# pasar el salto de linea. Se leia bien y no protegia nada.
+python3 - <<'PY'
+p='src/consulta.mjs'; s=open(p).read()
+s=s.replace('    if (c < 32 || (c >= 127 && c <= 159)) return true;', '    if (false) return true;')
+open(p,'w').write(s)
+PY
+exigir_rojo "S8 desactivar el guard de caracteres de control"
+cp "$BAKC" src/consulta.mjs
+
+# S9: la salida del modelo se acepta sin validar contra la lista de ids. Es la
+# defensa principal contra que un visitante publique texto propio bajo este
+# dominio: si esto pasara en verde, la suite no estaria midiendo la inyeccion.
+python3 - <<'PY'
+p='src/ia.mjs'; s=open(p).read()
+s=s.replace('  if (ids.includes(limpia)) {', '  if (true) {')
+open(p,'w').write(s)
+PY
+exigir_rojo "S9 aceptar la salida del modelo sin validarla"
+cp "$BAKA" src/ia.mjs
+
+# S10: se acepta un id que aparezca EN CUALQUIER LUGAR del texto del modelo.
+# Es la version sutil de S9 y la que un humano escribiria "para ser tolerante".
+python3 - <<'PY'
+p='src/ia.mjs'; s=open(p).read()
+s=s.replace('  if (ids.includes(limpia)) {', '  const suelto = ids.find(i => String(cruda||"").toLowerCase().includes(i));\n  if (suelto) { return { recurso: suelto, fuente: "ia", motivo: null, neuronas: costo }; }\n  if (ids.includes(limpia)) {')
+open(p,'w').write(s)
+PY
+exigir_rojo "S10 aceptar un id escondido en una frase"
+cp "$BAKA" src/ia.mjs
+
+# S11: el modelo se invoca sin contador de gasto. La cuota gratis es finita
+# (10.000 neuronas por dia) y gastar sin poder contar es la definicion de no
+# medido.
+python3 - <<'PY'
+p='src/ia.mjs'; s=open(p).read()
+s=s.replace("  if (!env.CONTADOR || typeof env.CONTADOR.get !== 'function') {", "  if (false) {")
+open(p,'w').write(s)
+PY
+exigir_rojo "S11 invocar el modelo sin contador de gasto"
+cp "$BAKA" src/ia.mjs
+
+# S12: la busqueda determinista desaparece y la IA pasa a ser obligatoria. Sin
+# cuota o con el modelo caido, la puerta dejaria de responder.
+python3 - <<'PY'
+p='src/ia.mjs'; s=open(p).read()
+s=s.replace("    return { recurso: porDefecto, fuente: 'determinista', motivo: 'sin_binding', neuronas: 0 };",
+            "    return { recurso: null, fuente: 'ninguna', motivo: 'sin_binding', neuronas: 0 };")
+open(p,'w').write(s)
+PY
+exigir_rojo "S12 quitar el piso determinista"
+cp "$BAKA" src/ia.mjs
 
 echo "SABOTAJE: $fallas fallas"
 exit $fallas
