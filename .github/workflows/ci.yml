@@ -27,8 +27,10 @@ jobs:
 
       # El paso que hace que los dos de arriba signifiquen algo: rompe el
       # codigo a proposito y EXIGE que la suite se ponga roja.
+      # Se invoca con bash porque la API de GitHub sube los archivos sin bit
+      # ejecutable: './tools/sabotaje.sh' daria permission denied.
       - name: sabotaje obligatorio
-        run: ./tools/sabotaje.sh
+        run: bash ./tools/sabotaje.sh
 
       - name: el arbol quedo limpio despues del sabotaje
         run: git diff --exit-code
