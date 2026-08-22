@@ -4,60 +4,95 @@
 # Se corre desde puerta/. No deja el arbol modificado.
 set -u
 cd "$(dirname "$0")/.."
-BAK=$(mktemp); cp src/index.mjs "$BAK"
-BAK2=$(mktemp); cp src/recibo.mjs "$BAK2"
-restaurar(){ cp "$BAK" src/index.mjs; cp "$BAK2" src/recibo.mjs; rm -f "$BAK" "$BAK2"; }
+BAKD=$(mktemp); cp src/direccion.mjs "$BAKD"
+BAKI=$(mktemp); cp src/index.mjs "$BAKI"
+BAKM=$(mktemp); cp src/documentos.mjs "$BAKM"
+restaurar(){
+  cp "$BAKD" src/direccion.mjs; cp "$BAKI" src/index.mjs; cp "$BAKM" src/documentos.mjs
+  rm -f "$BAKD" "$BAKI" "$BAKM"
+}
 trap restaurar EXIT
 rojo(){ node --test test/*.test.mjs >/dev/null 2>&1 && echo verde || echo rojo; }
 fallas=0
+exigir_rojo(){ # $1 etiqueta
+  local r; r=$(rojo); echo "$1 -> $r (esperado rojo)"
+  [ "$r" = rojo ] || fallas=$((fallas+1))
+}
 
-# S1: presupuesto antes de la sala (el bug que rompia la fase molinete)
+# S1: la direccion deja de vencer. ES EL SABOTAJE MAS IMPORTANTE: sin
+# vencimiento el agente cachea la URL y entra directo para siempre, y la
+# medicion se pierde despues de la primera visita. Toda la puerta v2 existe
+# para que esto no pase.
+sed -i 's/for (const cand of \[e, e - 1\])/for (const cand of [e, e-1, e-2, e-3, e-4, e-5])/' src/direccion.mjs
+exigir_rojo "S1 la direccion deja de vencer"
+cp "$BAKD" src/direccion.mjs
+
+# S2: colapsar vencida e invalida en un solo estado. Perder esa distincion es
+# perder justo el evento que hay que contar: el agente que vuelve con un
+# ticket viejo.
+python3 - <<'PY'
+p='src/direccion.mjs'; s=open(p).read()
+s=s.replace("return { ok: false, motivo: 'vencida', epoca: cand };",
+            "return { ok: false, motivo: 'invalida' };")
+open(p,'w').write(s)
+PY
+exigir_rojo "S2 colapsar vencida con invalida"
+cp "$BAKD" src/direccion.mjs
+
+# S3: la firma deja de ligar al operador. Una direccion filtrada le serviria a
+# cualquiera, y la identidad declarada dejaria de valer mas que el anonimato.
+python3 - <<'PY'
+p='src/direccion.mjs'; s=open(p).read()
+s=s.replace("`v1|${recurso}|${epoca}|${operador || ''}`", "`v1|${recurso}|${epoca}|`")
+open(p,'w').write(s)
+PY
+exigir_rojo "S3 la firma ignora al operador"
+cp "$BAKD" src/direccion.mjs
+
+# S4: la allowlist se abre. Cualquier ruta se podria firmar y servir.
+python3 - <<'PY'
+p='src/direccion.mjs'; s=open(p).read()
+s=s.replace("return typeof id === 'string' && Object.prototype.hasOwnProperty.call(RECURSOS, id);",
+            "return typeof id === 'string';")
+open(p,'w').write(s)
+PY
+exigir_rojo "S4 abrir la allowlist de recursos"
+cp "$BAKD" src/direccion.mjs
+
+# S5: la entrada vuelve a exigir algo. Es el bug de la v1: un crawler que hace
+# GET y sigue links queda afuera.
 python3 - <<'PY'
 p='src/index.mjs'; s=open(p).read()
-a=s.index('    // GUARD 6 - la sala.'); b=s.index('    // GUARD 7 - presupuesto.'); c=s.index('    const r = await ejecutarEnSala')
-open(p,'w').write(s[:a]+s[b:c]+s[a:b]+s[c:])
+old="    if (url.pathname === RUTA_ENTRADA) {"
+new=("    if (url.pathname === RUTA_ENTRADA) {\n"
+     "      if (!url.searchParams.get('k')) return txt('401 falta la llave\\n', 401);")
+assert old in s
+open(p,'w').write(s.replace(old,new,1))
 PY
-r=$(rojo); echo "S1 reordenar guards -> $r (esperado rojo)"
-[ "$r" = rojo ] || fallas=$((fallas+1))
-cp "$BAK" src/index.mjs
+exigir_rojo "S5 la entrada vuelve a pedir llave"
+cp "$BAKI" src/index.mjs
 
-# S2: estirar la ventana de gracia a dos epocas
-sed -i 's/\[epoca, epoca - 1\]/[epoca, epoca - 1, epoca - 2]/' src/index.mjs
-r=$(rojo); echo "S2 ventana de gracia -> $r (esperado rojo)"
-[ "$r" = rojo ] || fallas=$((fallas+1))
-cp "$BAK" src/index.mjs
-
-# S3: comparacion no constante. DECLARADO NO MEDIDO: la suite no mide tiempo,
-# asi que este sabotaje da verde y eso NO es una falla del sabotaje, es el
-# hueco de la suite, escrito aca para que nadie lo lea como cobertura.
-sed -i 's/  let d = 0;/  return a === b;/' src/index.mjs
-r=$(rojo); echo "S3 tiempo constante -> $r (NO MEDIDO: la suite no mide tiempo)"
-cp "$BAK" src/index.mjs
-
-# S4: volver a devolver un error en la fase molinete. Es el bug de negocio,
-# no de codigo: 501 es semantica HTTP correcta y Cloudflare no factura errores,
-# asi que la puerta entera cobraria cero. Tiene que dar rojo.
-sed -i 's/textoRecibo({ epoca: epocaOk, informe, forwarded }), 200, {/textoRecibo({ epoca: epocaOk, informe, forwarded }), 501, {/' src/index.mjs
-if grep -q 'forwarded }), 501,' src/index.mjs; then
-  r=$(rojo); echo "S4 volver al 501 en el molinete -> $r (esperado rojo)"
-  [ "$r" = rojo ] || fallas=$((fallas+1))
-else
-  echo "S4 NO MEDIDO: el sabotaje no se aplico, el patron no matcheo"
-  fallas=$((fallas+1))
-fi
-cp "$BAK" src/index.mjs
-
-# S5: sacarle la atribucion al cuerpo entregado. La licencia exige atribucion,
-# y una atribucion que no viaja con el contenido no se cumple. Rojo.
-BAKR=$(mktemp); cp src/recibo.mjs "$BAKR"
-python3 - <<'PYS'
-p='src/recibo.mjs'; s=open(p).read()
+# S6: quitar la atribucion del contenido entregado. La licencia la exige, y una
+# atribucion que no viaja con el texto no se cumple.
+python3 - <<'PY'
+p='src/documentos.mjs'; s=open(p).read()
 s=s.replace('AUTOR: ${AUTOR}', 'AUTOR: (omitido)')
 open(p,'w').write(s)
-PYS
-r=$(rojo); echo "S5 quitar la atribucion del cuerpo -> $r (esperado rojo)"
-[ "$r" = rojo ] || fallas=$((fallas+1))
-cp "$BAKR" src/recibo.mjs; rm -f "$BAKR"
+PY
+exigir_rojo "S6 quitar la atribucion del cuerpo"
+cp "$BAKM" src/documentos.mjs
+
+# S7: DECLARADO NO MEDIDO. La comparacion en tiempo constante se cambia por
+# una comun y la suite NO puede verlo: no mide tiempo. Da verde, y ese verde no
+# es robustez del codigo, es el hueco de la suite, escrito aca para que nadie
+# lo lea como cobertura.
+python3 - <<'PY'
+p='src/direccion.mjs'; s=open(p).read()
+s=s.replace("  let d = 0;", "  return a === b;")
+open(p,'w').write(s)
+PY
+r=$(rojo); echo "S7 tiempo constante -> $r (NO MEDIDO: la suite no mide tiempo)"
+cp "$BAKD" src/direccion.mjs
 
 echo "SABOTAJE: $fallas fallas"
 exit $fallas
