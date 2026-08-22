@@ -1,13 +1,45 @@
 name: kiosco
 
+# El disparo era push a '**' MAS pull_request, asi que cada commit de una rama
+# con PR corria el workflow dos veces. Sumado a que los dos workflows llamaban
+# "verificar" a su job, el commit 1b34913 quedo con cuatro check runs con el
+# mismo nombre y ninguna forma de saber cual era cual.
 on:
-  push:
-    branches: ['**']
   pull_request:
+    paths:
+      - 'kiosco/**'
+      - '.github/workflows/kiosco.yml'
+      - '.github/scripts/paso.sh'
+  push:
+    branches: [main]
+    paths:
+      - 'kiosco/**'
+      - '.github/workflows/kiosco.yml'
+      - '.github/scripts/paso.sh'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kiosco-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  verificar:
+  kiosco:
+    # El nombre del job ES el nombre del check run. Con dos workflows llamando
+    # "verificar" a su job, el estado del commit era ilegible.
+    name: kiosco
     runs-on: ubuntu-latest
+    # PROHIBIDO usar el contexto runner aca: no se resuelve en el env de un job
+    # y el run no arranca. Lo aprendi rompiendolo. Las rutas que dependen del
+    # runner se resuelven adentro de los steps, desde $RUNNER_TEMP.
+    env:
+      PASO: ${{ github.workspace }}/.github/scripts/paso.sh
+      NOMBRE_SUITE: kiosco
+      # 30 lineas alcanzaban para UN test de node --test con su stack, y el run
+      # 7 fallo con SEIS: cinco quedaron fuera de la ventana. El numero anterior
+      # lo elegi sin medir cuanto ocupa un fallo.
+      LINEAS_ANOTADAS: '200'
     defaults:
       run:
         working-directory: kiosco
@@ -17,134 +49,66 @@ jobs:
         with:
           node-version: '22'
 
-      # POR QUE CADA PASO ESCRIBE UN LOG Y UN .exit:
-      # el run anterior fallo y lo unico visible sin autenticarse fue "Process
-      # completed with exit code 1". Eso es saber que fallo sin saber donde, o
-      # sea un NO MEDIDO con forma de falla. El paso final del job vuelca estos
-      # archivos al Summary, que si es publico.
-      #
-      # set +e y PIPESTATUS son necesarios, no decorativos: con el -e por
-      # defecto de GitHub el script aborta antes de escribir el .exit, y el
-      # registro del fallo se pierde justo cuando importa.
-
       # Los tests de logica NO necesitan dependencias: usan solo la libreria
       # estandar de Node. Corren primero porque dan el diagnostico mas rapido.
-      - name: tests de logica
-        run: |
-          set +e
-          node --test test/*.test.mjs 2>&1 | tee /tmp/kiosco-01-tests.log
-          codigo=${PIPESTATUS[0]}
-          echo $codigo > /tmp/kiosco-01-tests.exit
-          exit $codigo
+      - name: 01 tests de logica
+        run: bash "$PASO" correr 01-tests 'node --test test/*.test.mjs'
 
       # El paso que hace que el de arriba signifique algo: rompe el codigo a
       # proposito y EXIGE que la suite se ponga roja. Incluye los sabotajes de
       # NEGOCIO, que son los que un test de formato no ve.
-      - name: sabotaje obligatorio
-        run: |
-          set +e
-          bash tools/sabotaje.sh 2>&1 | tee /tmp/kiosco-02-sabotaje.log
-          codigo=${PIPESTATUS[0]}
-          echo $codigo > /tmp/kiosco-02-sabotaje.exit
-          exit $codigo
+      - name: 02 sabotaje obligatorio
+        run: bash "$PASO" correr 02-sabotaje 'bash tools/sabotaje.sh'
 
-      - name: el arbol quedo limpio despues del sabotaje
-        run: |
-          set +e
-          git diff --exit-code 2>&1 | tee /tmp/kiosco-03-arbol.log
-          codigo=${PIPESTATUS[0]}
-          echo $codigo > /tmp/kiosco-03-arbol.exit
-          exit $codigo
+      - name: 03 el arbol quedo limpio despues del sabotaje
+        run: bash "$PASO" correr 03-arbol 'git diff --exit-code'
 
-      # ESTE ES EL TESTIGO INDEPENDIENTE del protocolo MCP.
-      # El entorno donde se escribio el codigo no tiene red ni npm, asi que
-      # todo lo que dependa del SDK era NO MEDIDO ahi. Aca se instalan los
-      # paquetes reales y se hace un handshake completo: initialize,
-      # tools/list y tools/call. Si el SDK v2 no fuera compatible con el
-      # handler stateless, falla aca y no en produccion.
-      - name: instalar dependencias reales
-        run: |
-          set +e
-          npm install --no-audit --no-fund 2>&1 | tee /tmp/kiosco-04-npm.log
-          codigo=${PIPESTATUS[0]}
-          echo $codigo > /tmp/kiosco-04-npm.exit
-          exit $codigo
+      # RESOLUCION ANTES DE INSTALAR.
+      #
+      # MEDIDO EN EL RUN 7, y descarta la sospecha que estaba escrita aca:
+      # agents 0.21.0 pide como peers NO opcionales @modelcontextprotocol/sdk
+      # 1.30.0 y @modelcontextprotocol/client 2.0.0, y el package.json del
+      # kiosco no declara ninguno de los dos. Igual npm los resuelve solo: este
+      # paso y el 05 dieron exit 0. La hipotesis era razonable y es FALSA.
+      # El paso se queda igual, porque su valor ahora es de regresion: si un dia
+      # la resolucion se rompe, se ve aca y no dentro del install.
+      - name: 04 resolucion de dependencias, sin escribir nada
+        run: bash "$PASO" correr 04-resolucion 'npm install --dry-run --no-audit --no-fund'
 
-      - name: test del protocolo MCP real
-        run: |
-          set +e
-          node --test test-integracion/*.test.mjs 2>&1 | tee /tmp/kiosco-05-protocolo.log
-          codigo=${PIPESTATUS[0]}
-          echo $codigo > /tmp/kiosco-05-protocolo.exit
-          exit $codigo
+      - name: 05 instalar dependencias reales
+        run: bash "$PASO" correr 05-npm 'npm install --no-audit --no-fund'
 
-      # Lo mas cerca del deploy sin desplegar: wrangler valida la config,
-      # arma el bundle y resuelve las dependencias.
-      - name: dry-run del deploy
-        run: |
-          set +e
-          npx wrangler deploy --dry-run --outdir=/tmp/kiosco-build 2>&1 | tee /tmp/kiosco-06-dryrun.log
-          codigo=${PIPESTATUS[0]}
-          echo $codigo > /tmp/kiosco-06-dryrun.exit
-          exit $codigo
+      # Evidencia cruda de QUE quedo instalado. Sin esto, un fallo del protocolo
+      # no distingue "el codigo esta mal" de "se instalo otra version".
+      - name: 06 versiones que quedaron instaladas
+        run: bash "$PASO" correr 06-versiones 'npm ls --depth=0 || true; npm ls @modelcontextprotocol/server @modelcontextprotocol/sdk zod agents || true'
+
+      # ESTE ES EL TESTIGO INDEPENDIENTE del protocolo MCP, y ya cobro: en el
+      # run 7 se puso rojo con 6 de 12 tests fallando, sobre un servidor que
+      # localmente daba 74 tests verdes. Ninguna lectura de documentacion
+      # hubiera encontrado eso.
+      - name: 07 test del protocolo MCP real
+        run: bash "$PASO" correr 07-protocolo 'node --test test-integracion/*.test.mjs'
+
+      # Lo mas cerca del deploy sin desplegar: wrangler valida la config, arma
+      # el bundle y resuelve las dependencias. El outdir va a $RUNNER_TEMP y no
+      # al arbol de trabajo, para que el paso del arbol limpio no lo vea.
+      - name: 08 dry-run del deploy
+        run: bash "$PASO" correr 08-dryrun 'npx wrangler deploy --dry-run --outdir="$RUNNER_TEMP/build-kiosco"'
 
       # El limite de un Worker en el plan gratis es 3 MB. Si el bundle se
       # acerca, conviene saberlo antes de que el deploy lo rechace.
-      - name: tamano del bundle
-        run: |
-          set +e
-          {
-            bytes=$(find /tmp/kiosco-build -name '*.js' -exec cat {} + | wc -c)
-            echo bundle en bytes: $bytes
-            if [ "$bytes" -gt 2500000 ]; then
-              echo FALLA: el bundle supera 2,5 MB y el limite del plan gratis es 3 MB
-              exit 1
-            fi
-            echo OK: por debajo del limite de 2,5 MB
-          } 2>&1 | tee /tmp/kiosco-07-bundle.log
-          codigo=${PIPESTATUS[0]}
-          echo $codigo > /tmp/kiosco-07-bundle.exit
-          exit $codigo
+      #
+      # El guard distingue tres estados: si el directorio no existe o no tiene
+      # un solo .js, NO dice "0 bytes, todo bien". La version anterior hacia
+      # find | wc -c, y sin resultados imprimia 0 y reportaba OK sobre un bundle
+      # que no existia.
+      - name: 09 tamano del bundle
+        run: bash "$PASO" correr 09-bundle 'bash tools/medir-bundle.sh'
 
-      # EL PASO QUE HACE PUBLICO EL DIAGNOSTICO.
-      # Corre SIEMPRE, incluso despues de una falla, y distingue tres estados
-      # por paso. La tercera fila es la que faltaba: sin ella, un paso que
-      # nunca se ejecuto se lee igual que uno que paso.
-      - name: resumen publico del run
+      # EL PASO QUE HACE PUBLICO EL DIAGNOSTICO. Corre siempre, incluso despues
+      # de una falla, y declara los pasos que NO CORRIERON: sin esa fila, un
+      # paso que el job nunca alcanzo se lee igual que uno que paso.
+      - name: cierre publico del run
         if: always()
-        run: |
-          set +e
-          resumen="$GITHUB_STEP_SUMMARY"
-          echo "## Verificacion del kiosco" >> "$resumen"
-          echo "" >> "$resumen"
-          echo "| paso | estado |" >> "$resumen"
-          echo "| --- | --- |" >> "$resumen"
-          for paso in 01-tests 02-sabotaje 03-arbol 04-npm 05-protocolo 06-dryrun 07-bundle; do
-            if [ -f "/tmp/kiosco-$paso.exit" ]; then
-              c=$(cat "/tmp/kiosco-$paso.exit")
-              if [ "$c" = "0" ]; then
-                echo "| $paso | paso (exit 0) |" >> "$resumen"
-              else
-                echo "| $paso | FALLO (exit $c) |" >> "$resumen"
-              fi
-            else
-              echo "| $paso | NO CORRIO |" >> "$resumen"
-            fi
-          done
-          echo "" >> "$resumen"
-          for paso in 01-tests 02-sabotaje 03-arbol 04-npm 05-protocolo 06-dryrun 07-bundle; do
-            archivo="/tmp/kiosco-$paso.log"
-            if [ -f "$archivo" ]; then
-              c=$(cat "/tmp/kiosco-$paso.exit" 2>/dev/null || echo "sin_exit")
-              echo "### $paso (exit $c)" >> "$resumen"
-              echo '```' >> "$resumen"
-              tail -40 "$archivo" >> "$resumen"
-              echo '```' >> "$resumen"
-              echo "" >> "$resumen"
-            else
-              echo "### $paso" >> "$resumen"
-              echo "NO CORRIO: el job abortó antes de llegar a este paso." >> "$resumen"
-              echo "" >> "$resumen"
-            fi
-          done
-          exit 0
+        run: bash "$PASO" cierre 01-tests 02-sabotaje 03-arbol 04-resolucion 05-npm 06-versiones 07-protocolo 08-dryrun 09-bundle
