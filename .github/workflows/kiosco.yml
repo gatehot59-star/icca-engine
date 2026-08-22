@@ -30,9 +30,12 @@ jobs:
     # "verificar" a su job, el estado del commit era ilegible.
     name: kiosco
     runs-on: ubuntu-latest
+    # PROHIBIDO usar el contexto runner aca: no se resuelve en el env de un job
+    # y el run no arranca. Lo aprendi rompiendolo. Las rutas que dependen del
+    # runner se resuelven adentro de los steps, desde $RUNNER_TEMP.
     env:
-      DIR_PASOS: ${{ runner.temp }}/pasos-kiosco
       PASO: ${{ github.workspace }}/.github/scripts/paso.sh
+      NOMBRE_SUITE: kiosco
     defaults:
       run:
         working-directory: kiosco
@@ -82,28 +85,20 @@ jobs:
         run: bash "$PASO" correr 07-protocolo 'node --test test-integracion/*.test.mjs'
 
       # Lo mas cerca del deploy sin desplegar: wrangler valida la config, arma
-      # el bundle y resuelve las dependencias.
+      # el bundle y resuelve las dependencias. El outdir va a $RUNNER_TEMP y no
+      # al arbol de trabajo, para que el paso del arbol limpio no lo vea.
       - name: 08 dry-run del deploy
-        run: bash "$PASO" correr 08-dryrun 'npx wrangler deploy --dry-run --outdir="$DIR_PASOS/build"'
+        run: bash "$PASO" correr 08-dryrun 'npx wrangler deploy --dry-run --outdir="$RUNNER_TEMP/build-kiosco"'
 
       # El limite de un Worker en el plan gratis es 3 MB. Si el bundle se
       # acerca, conviene saberlo antes de que el deploy lo rechace.
       #
       # El guard distingue tres estados: si el directorio no existe o no tiene
-      # un solo .js, NO dice "0 bytes, todo bien". Un find sin resultados y un
-      # bundle vacio se leen igual y no son lo mismo.
+      # un solo .js, NO dice "0 bytes, todo bien". La version anterior hacia
+      # find | wc -c, y sin resultados imprimia 0 y reportaba OK sobre un bundle
+      # que no existia.
       - name: 09 tamano del bundle
-        run: |
-          bash "$PASO" correr 09-bundle 'set -u
-            dir="$DIR_PASOS/build"
-            if [ ! -d "$dir" ]; then echo "NO MEDIDO: no existe $dir, el dry-run no dejo bundle"; exit 1; fi
-            n=$(find "$dir" -name "*.js" | wc -l)
-            if [ "$n" -eq 0 ]; then echo "NO MEDIDO: no hay ningun .js en $dir"; exit 1; fi
-            bytes=$(find "$dir" -name "*.js" -exec cat {} + | wc -c)
-            echo "archivos: $n"
-            echo "bundle en bytes: $bytes"
-            if [ "$bytes" -gt 2500000 ]; then echo "FALLA: supera 2,5 MB y el limite del plan gratis es 3 MB"; exit 1; fi
-            echo "OK: por debajo del limite de 2,5 MB"'
+        run: bash "$PASO" correr 09-bundle 'bash tools/medir-bundle.sh'
 
       # EL PASO QUE HACE PUBLICO EL DIAGNOSTICO. Corre siempre, incluso despues
       # de una falla, y declara los pasos que NO CORRIERON: sin esa fila, un

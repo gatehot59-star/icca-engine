@@ -17,11 +17,18 @@
 #   paso.sh cierre <nombre> [<nombre> ...]
 #
 # Variables:
-#   DIR_PASOS        donde se guardan los .log y los .exit. Default /tmp/pasos
-#   LINEAS_ANOTADAS  cuantas lineas finales del log van en la anotacion. Default 30
+#   DIR_PASOS        donde se guardan los .log y los .exit
+#   NOMBRE_SUITE     separa los logs de una suite de los de otra
+#   LINEAS_ANOTADAS  cuantas lineas finales del log van en la anotacion (30)
+#
+# El default de DIR_PASOS sale de $RUNNER_TEMP, que es una VARIABLE DE ENTORNO
+# del runner y esta siempre seteada. No se usa el contexto runner en el env de
+# un job: ahi no se resuelve, y usarlo hizo que el run 33 fallara al arrancar,
+# con cero jobs y sin un solo check run. El guard validar-workflows.py existe
+# por ese error.
 set -u
 
-DIR="${DIR_PASOS:-/tmp/pasos}"
+DIR="${DIR_PASOS:-${RUNNER_TEMP:-/tmp}/pasos-${NOMBRE_SUITE:-general}}"
 LINEAS="${LINEAS_ANOTADAS:-30}"
 mkdir -p "$DIR"
 

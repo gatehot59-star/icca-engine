@@ -1,0 +1,50 @@
+name: meta
+
+# EL WORKFLOW QUE MIRA A LOS OTROS WORKFLOWS.
+#
+# Vive aparte a proposito. Un guard que corriera dentro de kiosco.yml no puede
+# salvar a kiosco.yml: si ese archivo esta roto, su job no arranca y el guard
+# nunca corre. Fue exactamente lo que paso en el run 33, y el sintoma es el peor
+# posible: cero jobs, cero check runs, y un estado combinado que dice pending
+# con total_count 0. Un estado vacio se lee como "todavia no corrio".
+#
+# meta.yml no cambia cuando cambian los otros y los lee como datos, asi que un
+# workflow que no arrancaria queda como un check ROJO con su anotacion en vez de
+# como un silencio.
+on:
+  pull_request:
+    paths:
+      - '.github/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: meta-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  meta:
+    name: meta
+    runs-on: ubuntu-latest
+    env:
+      PASO: ${{ github.workspace }}/.github/scripts/paso.sh
+      NOMBRE_SUITE: meta
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 01 validar todos los workflows
+        run: bash "$PASO" correr 01-workflows 'python3 .github/scripts/validar-workflows.py .github/workflows/*.yml'
+
+      # El contra-caso del guard: planta los dos defectos y exige que el guard
+      # se ponga rojo. Un guard que no puede dar rojo mide su propia existencia.
+      - name: 02 el guard tiene que poder dar rojo
+        run: bash "$PASO" correr 02-contracaso 'bash .github/scripts/contracaso-guard.sh'
+
+      - name: cierre publico del run
+        if: always()
+        run: bash "$PASO" cierre 01-workflows 02-contracaso

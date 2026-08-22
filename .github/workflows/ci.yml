@@ -29,9 +29,11 @@ jobs:
     # llamando "verificar" a su job, el estado del commit era ilegible.
     name: puerta
     runs-on: ubuntu-latest
+    # PROHIBIDO usar el contexto runner aca: no se resuelve en el env de un job
+    # y el run no arranca. El guard validar-workflows.py lo rechaza.
     env:
-      DIR_PASOS: ${{ runner.temp }}/pasos-puerta
       PASO: ${{ github.workspace }}/.github/scripts/paso.sh
+      NOMBRE_SUITE: puerta
     defaults:
       run:
         working-directory: puerta
