@@ -1,0 +1,8 @@
+# El corpus PUBLICABLE se genera en la maquina que tiene SECRETO.
+# No va al repo: los fragmentos derivan del secreto, y tenerlos versionados
+# obliga a reescribir la historia cada vez que el secreto rota.
+/corpus/
+.secreto
+node_modules/
+.wrangler/
+.dev.vars

@@ -1,0 +1,34 @@
+name: puerta
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: puerta
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Sin npm install: la suite y el preflight usan SOLO la libreria estandar
+      # de Node. wrangler se instala recien al desplegar.
+      - name: tests
+        run: node --test test/*.test.mjs
+
+      - name: preflight
+        run: node preflight.mjs
+
+      # El paso que hace que los dos de arriba signifiquen algo: rompe el
+      # codigo a proposito y EXIGE que la suite se ponga roja.
+      - name: sabotaje obligatorio
+        run: ./tools/sabotaje.sh
+
+      - name: el arbol quedo limpio despues del sabotaje
+        run: git diff --exit-code

@@ -1,0 +1,18 @@
+{
+  "name": "puerta-de-computo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Puerta de Computo de icca-engine.com: el computo se regala, el precio es leer el corpus.",
+  "author": "Jorge Abraham Mendieta",
+  "license": "SEE LICENSE IN ../LICENSE-RSL.md",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "preflight": "node preflight.mjs",
+    "verificar": "npm test && npm run preflight",
+    "deploy": "npm run verificar && wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.125.0"
+  }
+}
