@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import worker, { llaveDeEpoca, fragmentoDe, igualCte, textoManifiesto } from '../src/index.mjs';
+import { sha256Hex } from '../src/recibo.mjs';
 import { epocaDe, piezasDeEpoca, nombrePieza, DUR_EPOCA_MS } from '../src/epoca.mjs';
 
 const SECRETO = 'a'.repeat(64);
@@ -63,15 +64,15 @@ test('W11 llave hex en MAYUSCULAS se rechaza (formato canonico)', async () => {
 test('W12 llave bien formada pero incorrecta da 403', async () => {
   assert.equal((await pedir('?k=' + 'b'.repeat(64), base())).status, 403);
 });
-test('W13 llave correcta pasa el guard de llave', async () => {
+test('W13 llave correcta entrega 200, NO un error (los errores no se facturan)', async () => {
   const k = await llaveDeEpoca(SECRETO, EPOCA);
   const r = await pedir(`?k=${k}&l=python&s=${b64('print(1)')}`, base());
-  assert.equal(r.status, 501);
+  assert.equal(r.status, 200);
 });
 test('W14 la epoca de gracia (anterior) sigue siendo valida', async () => {
   const k = await llaveDeEpoca(SECRETO, EPOCA - 1);
   const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, base());
-  assert.equal(r.status, 501);
+  assert.equal(r.status, 200);
 });
 test('W15 dos epocas atras YA NO vale', async () => {
   const k = await llaveDeEpoca(SECRETO, EPOCA - 2);
@@ -97,13 +98,13 @@ test('W19 fuente mayor a 8192 B da 413', async () => {
 test('W20 fuente de exactamente 8192 B pasa', async () => {
   const k = await llaveDeEpoca(SECRETO, EPOCA);
   const r = await pedir(`?k=${k}&l=python&s=${b64('x'.repeat(8192))}`, base());
-  assert.equal(r.status, 501);
+  assert.equal(r.status, 200);
 });
-test('W21 MOLINETE: sin proveedor NO exige contador y da 501', async () => {
+test('W21 MOLINETE: sin proveedor NO exige contador y entrega 200 facturable', async () => {
   const k = await llaveDeEpoca(SECRETO, EPOCA);
   const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, base());
-  assert.equal(r.status, 501);
-  assert.match(await r.text(), /SALA NO CONECTADA/);
+  assert.equal(r.status, 200);
+  assert.match(await r.text(), /ENTREGA DE CONTENIDO/);
 });
 test('W22 CONTRA-CASO: con proveedor SI exige contador y da 503', async () => {
   const k = await llaveDeEpoca(SECRETO, EPOCA);
@@ -160,7 +161,7 @@ test('W28 la tasa se cobra DESPUES de validar la llave (no la gasta un anonimo)'
 test('W29 s invalido en base64 no tira 500', async () => {
   const k = await llaveDeEpoca(SECRETO, EPOCA);
   const r = await pedir(`?k=${k}&l=python&s=%%%`, base());
-  assert.ok([400, 501].includes(r.status), `status inesperado ${r.status}`);
+  assert.ok([400, 200].includes(r.status), `status inesperado ${r.status}`);
 });
 test('W30 ninguna respuesta se cachea', async () => {
   const r = await worker.fetch(new Request('https://p/puerta/v1/manifiesto'), base());
@@ -203,4 +204,99 @@ test('W39 igualCte false si difieren en largo', () => {
 test('W40 igualCte no cortocircuita en el primer caracter', () => {
   assert.equal(igualCte('zbc', 'abc'), false);
   assert.equal(igualCte('abz', 'abc'), false);
+});
+
+// --- La entrega de la fase molinete: el 200 que reemplazo al 501 ----------
+// Existen porque un 501 no se factura (Cloudflare Pay Per Crawl FAQ,
+// verificado 2026-08-22) y por lo tanto la fase molinete no cobraba nada.
+
+test('W41 el 200 declara que NO se ejecuto, y dice por que', async () => {
+  const k = await llaveDeEpoca(SECRETO, EPOCA);
+  const r = await pedir(`?k=${k}&l=python&s=${b64('print(1)')}`, base());
+  const t = await r.text();
+  assert.match(t, /ejecutada: no/);
+  assert.match(t, /no hay sala de ejecucion conectada/);
+});
+test('W42 el 200 NO afirma haber ejecutado nada', async () => {
+  const k = await llaveDeEpoca(SECRETO, EPOCA);
+  const t = await (await pedir(`?k=${k}&l=python&s=${b64('print(1)')}`, base())).text();
+  assert.equal(/ejecutada: (si|yes)/i.test(t), false);
+});
+test('W43 el 200 lleva contenido licenciado de verdad, no un cartel', async () => {
+  const k = await llaveDeEpoca(SECRETO, EPOCA);
+  const t = await (await pedir(`?k=${k}&l=python&s=${b64('x')}`, base())).text();
+  assert.match(t, /TRES ESTADOS, NO DOS/);
+  assert.ok(t.length > 1200, `cuerpo demasiado corto: ${t.length} B`);
+});
+test('W44 el 200 lleva la atribucion PEGADA, no en otra URL', async () => {
+  const k = await llaveDeEpoca(SECRETO, EPOCA);
+  const t = await (await pedir(`?k=${k}&l=python&s=${b64('x')}`, base())).text();
+  assert.match(t, /Jorge Abraham Mendieta/);
+  assert.match(t, /license\.xml/);
+  assert.match(t, /creativecommons\.org\/licenses\/by\/4\.0/);
+  assert.match(t, /ENTRENAMIENTO DE MODELOS: es un permiso distinto/);
+});
+test('W45 el 200 anuncia la licencia por cabecera Link (RSL 1.0 seccion 4)', async () => {
+  const k = await llaveDeEpoca(SECRETO, EPOCA);
+  const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, base());
+  assert.match(r.headers.get('link'), /rel="license"/);
+  assert.match(r.headers.get('link'), /application\/rsl\+xml/);
+});
+test('W46 el informe de la fuente es correcto y determinista', async () => {
+  const k = await llaveDeEpoca(SECRETO, EPOCA);
+  const src = 'a=1\nb=2\nprint(a+b)';
+  const t = await (await pedir(`?k=${k}&l=python&s=${b64(src)}`, base())).text();
+  assert.match(t, new RegExp(`bytes:\\s+${src.length}`));
+  assert.match(t, /lineas:\s+3/);
+  assert.match(t, /sha256:\s+[0-9a-f]{64}/);
+});
+test('W47 el sha256 del informe es el de la fuente real', async () => {
+  const k = await llaveDeEpoca(SECRETO, EPOCA);
+  const src = 'print(1)';
+  const esperado = await sha256Hex(src);
+  const t = await (await pedir(`?k=${k}&l=python&s=${b64(src)}`, base())).text();
+  assert.ok(t.includes(esperado), 'el sha256 publicado no es el de la fuente');
+});
+test('W48 el 200 registra el operador declarado en Forwarded', async () => {
+  const k = await llaveDeEpoca(SECRETO, EPOCA);
+  const req = new Request(`https://p/puerta/v1/ejecutar?k=${k}&l=python&s=${b64('x')}`,
+    { headers: { forwarded: 'for="openai";use="reference"' } });
+  const r = await worker.fetch(req, base());
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('x-icca-operador'), 'openai');
+  assert.equal(r.headers.get('x-icca-uso'), 'reference');
+  assert.match(await r.text(), /OPERADOR DECLARADO: openai/);
+});
+test('W49 sin Forwarded queda SIN DECLARAR, que no es lo mismo que anonimo', async () => {
+  const k = await llaveDeEpoca(SECRETO, EPOCA);
+  const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, base());
+  assert.equal(r.headers.get('x-icca-operador'), 'sin_declarar');
+  assert.equal(r.headers.get('x-icca-uso'), 'sin_declarar');
+});
+test('W50 un uso desconocido NO se acepta como valido', async () => {
+  const k = await llaveDeEpoca(SECRETO, EPOCA);
+  const req = new Request(`https://p/puerta/v1/ejecutar?k=${k}&l=python&s=${b64('x')}`,
+    { headers: { forwarded: 'for="raro";use="todo"' } });
+  const r = await worker.fetch(req, base());
+  assert.equal(r.headers.get('x-icca-uso'), 'declarado_no_reconocido');
+  assert.match(await r.text(), /no reconocido \(todo\)/);
+});
+test('W51 el 200 dice QUE piezas hubo que leer para armar la llave', async () => {
+  const k = await llaveDeEpoca(SECRETO, EPOCA);
+  const t = await (await pedir(`?k=${k}&l=python&s=${b64('x')}`, base())).text();
+  for (const n of piezasDeEpoca(EPOCA)) assert.ok(t.includes(nombrePieza(n)));
+});
+test('W52 el 200 NO filtra el secreto ni ningun fragmento', async () => {
+  const k = await llaveDeEpoca(SECRETO, EPOCA);
+  const t = await (await pedir(`?k=${k}&l=python&s=${b64('x')}`, base())).text();
+  assert.ok(!t.includes(SECRETO));
+  for (const n of piezasDeEpoca(EPOCA)) {
+    const f = await fragmentoDe(SECRETO, n);
+    assert.ok(!t.includes(f), `el recibo filtro el fragmento de ${nombrePieza(n)}`);
+  }
+});
+test('W53 CONTRA-CASO: el 200 es de la fase molinete, no de cualquier error', async () => {
+  const r = await pedir('?k=' + 'b'.repeat(64) + '&l=python', base());
+  assert.equal(r.status, 403);
+  assert.ok(!(await r.text()).includes('TRES ESTADOS'));
 });

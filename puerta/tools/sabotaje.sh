@@ -5,7 +5,8 @@
 set -u
 cd "$(dirname "$0")/.."
 BAK=$(mktemp); cp src/index.mjs "$BAK"
-restaurar(){ cp "$BAK" src/index.mjs; rm -f "$BAK"; }
+BAK2=$(mktemp); cp src/recibo.mjs "$BAK2"
+restaurar(){ cp "$BAK" src/index.mjs; cp "$BAK2" src/recibo.mjs; rm -f "$BAK" "$BAK2"; }
 trap restaurar EXIT
 rojo(){ node --test test/*.test.mjs >/dev/null 2>&1 && echo verde || echo rojo; }
 fallas=0
@@ -32,6 +33,31 @@ cp "$BAK" src/index.mjs
 sed -i 's/  let d = 0;/  return a === b;/' src/index.mjs
 r=$(rojo); echo "S3 tiempo constante -> $r (NO MEDIDO: la suite no mide tiempo)"
 cp "$BAK" src/index.mjs
+
+# S4: volver a devolver un error en la fase molinete. Es el bug de negocio,
+# no de codigo: 501 es semantica HTTP correcta y Cloudflare no factura errores,
+# asi que la puerta entera cobraria cero. Tiene que dar rojo.
+sed -i 's/textoRecibo({ epoca: epocaOk, informe, forwarded }), 200, {/textoRecibo({ epoca: epocaOk, informe, forwarded }), 501, {/' src/index.mjs
+if grep -q 'forwarded }), 501,' src/index.mjs; then
+  r=$(rojo); echo "S4 volver al 501 en el molinete -> $r (esperado rojo)"
+  [ "$r" = rojo ] || fallas=$((fallas+1))
+else
+  echo "S4 NO MEDIDO: el sabotaje no se aplico, el patron no matcheo"
+  fallas=$((fallas+1))
+fi
+cp "$BAK" src/index.mjs
+
+# S5: sacarle la atribucion al cuerpo entregado. La licencia exige atribucion,
+# y una atribucion que no viaja con el contenido no se cumple. Rojo.
+BAKR=$(mktemp); cp src/recibo.mjs "$BAKR"
+python3 - <<'PYS'
+p='src/recibo.mjs'; s=open(p).read()
+s=s.replace('AUTOR: ${AUTOR}', 'AUTOR: (omitido)')
+open(p,'w').write(s)
+PYS
+r=$(rojo); echo "S5 quitar la atribucion del cuerpo -> $r (esperado rojo)"
+[ "$r" = rojo ] || fallas=$((fallas+1))
+cp "$BAKR" src/recibo.mjs; rm -f "$BAKR"
 
 echo "SABOTAJE: $fallas fallas"
 exit $fallas
