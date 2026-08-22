@@ -2,8 +2,9 @@
 // No reemplaza `wrangler deploy`: dice que nada de lo visible desde aca
 // va a hacerlo fallar. Tres estados: OK / FALLA / NO MEDIDO.
 import { readFileSync, existsSync } from 'node:fs';
-import worker, { llaveDeEpoca } from './src/index.mjs';
+import worker from './src/index.mjs';
 import { epocaDe } from './src/epoca.mjs';
+import { firmar, RECURSOS, RUTA_ENTRADA } from './src/direccion.mjs';
 
 let fallas = 0, nomedido = 0;
 const ok = (id, d = '') => { console.log(`[OK   ] ${id}`); if (d) console.log(`        ${d}`); };
@@ -51,45 +52,75 @@ di('P11 wrangler >= 4.36.0, que es lo que exige ratelimits',
    ma > 4 || (ma === 4 && mi >= 36), w);
 di('P12 type module: los .mjs necesitan ESM', pkg.type === 'module');
 
-for (const f of ['./src/epoca.mjs', './src/index.mjs', './src/sala.mjs', './src/recibo.mjs']) {
+for (const f of ['./src/epoca.mjs', './src/index.mjs', './src/sala.mjs',
+                 './src/recibo.mjs', './src/direccion.mjs', './src/documentos.mjs']) {
   try { await import(f); ok('P13 carga ' + f); } catch (e) { no('P13 carga ' + f, e.message); }
 }
 
 const env = { SECRETO: 'preflight'.repeat(8), TASA: { limit: async () => ({ success: true }) } };
 const epocaEnv = epocaDe(Date.now());
-const m = await worker.fetch(new Request('https://p/puerta/v1/manifiesto'), env);
-const mt = await m.text();
-di('P14 el manifiesto responde 200 con SOLO el secreto', m.status === 200,
-   `status=${m.status} bytes=${mt.length}`);
-di('P15 el manifiesto nombra 4 archivos del corpus',
-   (mt.match(/corpus\/pieza-\d\d\.md/g) || []).length === 4);
-const sin = await worker.fetch(new Request('https://p/puerta/v1/ejecutar'), env);
-di('P16 sin llave la ejecucion da 401', sin.status === 401);
+const ORIGEN = 'https://puerta.icca-engine.com';
 
-// P18, P19 y P20 existen por una medicion externa que invalido el diseno
-// anterior: el FAQ de Cloudflare Pay Per Crawl dice que las respuestas de error
-// NO se facturan (verificado 2026-08-22). La fase molinete devolvia 501, o sea
-// que no cobraba nada por muchos agentes que pasaran. Estos tres chequeos
-// impiden que eso vuelva sin que nadie lo note.
-const kOk = await llaveDeEpoca(env.SECRETO, epocaEnv);
-const entrega = await worker.fetch(new Request(
-  `https://p/puerta/v1/ejecutar?k=${kOk}&l=python&s=${Buffer.from('print(1)').toString('base64url')}`), env);
-const cuerpo = await entrega.text();
-di('P18 una llave valida recibe 200, no un error (los errores no se facturan)',
-   entrega.status === 200, `status=${entrega.status} bytes=${cuerpo.length}`);
-di('P19 el cuerpo entregado lleva contenido y atribucion, no un cartel',
-   cuerpo.length > 1200 && /TRES ESTADOS/.test(cuerpo) && /license\.xml/.test(cuerpo),
-   `bytes=${cuerpo.length}`);
-di('P20 la entrega declara que no hubo ejecucion',
-   /ejecutada: no/.test(cuerpo) && !/ejecutada: si/i.test(cuerpo));
+// P14-P16: la entrada. Un GET pelado, sin llave, sin cabeceras: si esto no da
+// 200, el rediseno de la v2 se perdio y volvimos a exigir que el cliente
+// razone.
+const ent = await worker.fetch(new Request(ORIGEN + RUTA_ENTRADA), env);
+const et = await ent.text();
+di('P14 la entrada da 200 a un GET pelado, sin llave',
+   ent.status === 200, `status=${ent.status} bytes=${et.length}`);
+di('P15 la entrada trae una direccion por recurso',
+   (et.match(/direccion: /g) || []).length === Object.keys(RECURSOS).length,
+   `recursos=${Object.keys(RECURSOS).length}`);
+di('P16 la entrada lleva contenido y atribucion, no solo punteros',
+   et.length > 1200 && /LICENCIA Y ATRIBUCION/.test(et), `bytes=${et.length}`);
+di('P17 la entrada no filtra el secreto', !et.includes(env.SECRETO));
 
-// P17 existe porque es la dependencia que hace que todo lo de arriba
-// sea verificable pero inutil: la puerta valida llaves que nadie puede armar
-// mientras el corpus no exista con ESOS nombres.
-const piezas = (mt.match(/pieza-\d\d\.md/g) || []);
-const faltan = piezas.filter(p => !existsSync(`../corpus/${p}`));
-if (faltan.length) nm('P17 el corpus referenciado existe', `faltan: ${faltan.join(', ')} -> corre tools/generar-corpus.mjs`);
-else ok('P17 el corpus referenciado existe');
+// P18-P19: el documento, siguiendo la direccion que dio la entrada. Es el
+// recorrido completo del agente, hecho por el codigo que se despliega.
+const dirCruda = (et.match(/direccion: (\S+)/) || [])[1];
+let dt = '';
+if (!dirCruda) { no('P18 la entrada publico una direccion usable'); }
+else {
+  const doc = await worker.fetch(new Request(dirCruda), env);
+  dt = await doc.text();
+  di('P18 la direccion de la entrada entrega 200 con el documento',
+     doc.status === 200, `status=${doc.status} bytes=${dt.length}`);
+  di('P19 el documento lleva su atribucion pegada',
+     /Jorge Abraham Mendieta/.test(dt) && /license\.xml/.test(dt), `bytes=${dt.length}`);
+}
+
+// P21 y P22 son el corazon del diseno: una direccion tiene que VENCER, y
+// vencida no puede confundirse con invalida. Si la primera fallara, el agente
+// entraria directo para siempre y la medicion se perderia en la segunda visita.
+const recurso0 = Object.keys(RECURSOS)[0];
+const tokVencido = await firmar(env.SECRETO, recurso0, epocaEnv - 2);
+const rv = await worker.fetch(new Request(`${ORIGEN}/metodo/${recurso0}?t=${tokVencido}`), env);
+const rvt = await rv.text();
+di('P21 una direccion de dos epocas atras da 410 vencida, no 200',
+   rv.status === 410 && rv.headers.get('x-icca-motivo') === 'vencida',
+   `status=${rv.status} motivo=${rv.headers.get('x-icca-motivo')}`);
+di('P22 el 410 no filtra el documento', !/grep -c/.test(rvt));
+
+const ri = await worker.fetch(new Request(`${ORIGEN}/metodo/${recurso0}?t=${'a'.repeat(32)}`), env);
+di('P23 un token inventado da 403 invalida, distinto de vencida',
+   ri.status === 403 && ri.headers.get('x-icca-motivo') === 'invalida',
+   `status=${ri.status} motivo=${ri.headers.get('x-icca-motivo')}`);
+
+// P24: la allowlist. Un recurso fuera de ella no se firma ni se sirve.
+const rx = await worker.fetch(new Request(`${ORIGEN}/metodo/inventado?t=${'a'.repeat(32)}`), env);
+di('P24 un recurso fuera de la allowlist da 404', rx.status === 404, `status=${rx.status}`);
+
+// P25: la licencia se anuncia por cabecera en toda respuesta (RSL 1.0 sec 4).
+di('P25 toda respuesta anuncia la licencia por cabecera Link',
+   /rel="license"/.test(ent.headers.get('link') || '') &&
+   /rel="license"/.test(rv.headers.get('link') || ''));
+
+// P26: NO MEDIDO explicito. La v2 ya no usa fragmentos en el corpus, asi que
+// el corpus publicado dejo de ser una dependencia del funcionamiento de la
+// puerta. Se deja el chequeo declarado para no perder de vista que el sitio
+// todavia tiene que publicarse.
+nm('P26 el corpus publicado en el sitio',
+   'la v2 no depende de fragmentos, pero el sitio sigue sin desplegarse');
 
 console.log('\n' + '='.repeat(70));
 console.log(`PREFLIGHT: ${fallas} fallas, ${nomedido} NO MEDIDO`);

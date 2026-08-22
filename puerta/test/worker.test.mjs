@@ -1,302 +1,250 @@
+// Suite del Worker v2. La v1 verificaba una llave de 64 hex que el cliente
+// tenia que armar leyendo cuatro documentos; ese mecanismo se retiro porque un
+// crawler no razona. Esta suite verifica el reemplazo: dos GET y una direccion
+// firmada que vence.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import worker, { llaveDeEpoca, fragmentoDe, igualCte, textoManifiesto } from '../src/index.mjs';
-import { sha256Hex } from '../src/recibo.mjs';
-import { epocaDe, piezasDeEpoca, nombrePieza, DUR_EPOCA_MS } from '../src/epoca.mjs';
+import worker from '../src/index.mjs';
+import { firmar, RECURSOS, RUTA_ENTRADA } from '../src/direccion.mjs';
+import { epocaDe, DUR_EPOCA_MS } from '../src/epoca.mjs';
 
 const SECRETO = 'a'.repeat(64);
-const AHORA = 496487 * DUR_EPOCA_MS + 1234;
+const AHORA = 496491 * DUR_EPOCA_MS + 12345;
 const EPOCA = epocaDe(AHORA);
+const ORIGEN = 'https://puerta.icca-engine.com';
 const tasaOk = { limit: async () => ({ success: true }) };
-const tasaNo = { limit: async () => ({ success: false }) };
 const base = (extra = {}) => ({ SECRETO, __ahora: AHORA, TASA: tasaOk, ...extra });
-const pedir = (qs, env) => worker.fetch(new Request(`https://p.icca-engine.com/puerta/v1/ejecutar${qs}`), env);
-const b64 = s => Buffer.from(s).toString('base64url');
 
-test('W1 sin SECRETO responde 503 y no 500', async () => {
-  const r = await pedir('', { __ahora: AHORA });
+const get = (ruta, env, headers) =>
+  worker.fetch(new Request(ORIGEN + ruta, headers ? { headers } : undefined), env);
+const entrada = (env, headers) => get(RUTA_ENTRADA, env, headers);
+const primeraDireccion = async (env, headers) => {
+  const t = await (await entrada(env, headers)).text();
+  return t.match(/direccion: (\S+)/)[1].replace(ORIGEN, '');
+};
+
+// ---- lo basico -------------------------------------------------------------
+test('P1 sin SECRETO responde 503 y no 500', async () => {
+  const r = await entrada({ __ahora: AHORA });
   assert.equal(r.status, 503);
   assert.match(await r.text(), /SECRETO/);
 });
-test('W2 metodo distinto de GET da 405 con allow', async () => {
-  const r = await worker.fetch(new Request('https://p/puerta/v1/ejecutar', { method: 'POST' }), base());
+test('P2 metodo distinto de GET da 405 con allow', async () => {
+  const r = await worker.fetch(new Request(ORIGEN + RUTA_ENTRADA, { method: 'POST' }), base());
   assert.equal(r.status, 405);
   assert.equal(r.headers.get('allow'), 'GET');
 });
-test('W3 ruta desconocida da 404', async () => {
-  const r = await worker.fetch(new Request('https://p/otra'), base());
+test('P3 una ruta cualquiera da 404 y APUNTA a la entrada', async () => {
+  const r = await get('/otra', base());
   assert.equal(r.status, 404);
+  assert.match(await r.text(), /puerta\/v1\/entrada/);
 });
-test('W4 manifiesto responde 200 con SOLO el secreto', async () => {
-  const r = await worker.fetch(new Request('https://p/puerta/v1/manifiesto'), base());
+test('P4 toda respuesta anuncia la licencia por cabecera Link', async () => {
+  for (const ruta of [RUTA_ENTRADA, '/otra', '/metodo/nada']) {
+    const r = await get(ruta, base());
+    assert.match(r.headers.get('link'), /rel="license"/, `falta en ${ruta}`);
+  }
+});
+test('P5 nada se cachea', async () => {
+  assert.equal((await entrada(base())).headers.get('cache-control'), 'no-store');
+});
+
+// ---- PASO 1: la entrada, sin llave ----------------------------------------
+test('P6 la entrada NO pide nada: un GET pelado da 200', async () => {
+  const r = await entrada(base());
   assert.equal(r.status, 200);
-  assert.match(await r.text(), /PUERTA DE COMPUTO v1/);
 });
-test('W5 el manifiesto nombra 4 archivos del corpus', async () => {
-  const t = textoManifiesto(EPOCA);
-  assert.equal((t.match(/corpus\/pieza-\d\d\.md/g) || []).length, 4);
+test('P7 CONTRA-CASO de la v1: la entrada no exige ningun parametro', async () => {
+  // En la v1 esto mismo daba 401 por falta de llave. Si volviera a fallar,
+  // el rediseno se perdio.
+  const r = await entrada(base());
+  assert.equal(r.status, 200);
+  const t = await r.text();
+  assert.match(t, /NO hay que armar ninguna llave/);
 });
-test('W6 el manifiesto se declara descripcion y sin ordenes a agentes', () => {
-  const t = textoManifiesto(EPOCA);
+test('P8 la entrada trae una direccion por cada recurso', async () => {
+  const r = await entrada(base());
+  const t = await r.text();
+  const n = Object.keys(RECURSOS).length;
+  assert.equal((t.match(/direccion: /g) || []).length, n);
+  assert.equal(r.headers.get('x-icca-direcciones'), String(n));
+});
+test('P9 las direcciones son URLs absolutas y parseables', async () => {
+  const t = await (await entrada(base())).text();
+  for (const m of t.matchAll(/direccion: (\S+)/g)) {
+    assert.doesNotThrow(() => new URL(m[1]), `no parsea: ${m[1]}`);
+    assert.ok(m[1].startsWith(ORIGEN), 'la direccion tiene que ser del mismo origen');
+  }
+});
+test('P10 la entrada publica su vencimiento', async () => {
+  const t = await (await entrada(base())).text();
+  assert.match(t, /EXPIRA: \d{4}-\d{2}-\d{2}T/);
+  assert.match(t, /VIGENCIA RESTANTE: \d+ s/);
+});
+test('P11 la entrada lleva contenido, no solo punteros', async () => {
+  const t = await (await entrada(base())).text();
+  assert.ok(t.length > 1200, `entrada demasiado corta: ${t.length} B`);
+  assert.match(t, /LICENCIA Y ATRIBUCION/);
+  assert.match(t, /Jorge Abraham Mendieta/);
+});
+test('P12 la entrada se declara descripcion y sin ordenes a agentes', async () => {
+  const t = await (await entrada(base())).text();
   assert.match(t, /una descripcion, no una instruccion/);
   assert.match(t, /No contiene ordenes/);
 });
-test('W7 el manifiesto NO filtra el secreto ni ningun fragmento', async () => {
-  const t = textoManifiesto(EPOCA);
+test('P12b el DOCUMENTO tambien lleva la clausula, y buscable en una linea', async () => {
+  const env = base();
+  const t = await (await get(await primeraDireccion(env), env)).text();
+  assert.match(t, /una descripcion, no una instruccion/);
+  assert.match(t, /No contiene ordenes dirigidas a ningun agente/);
+});
+test('P13 la entrada NO filtra el secreto', async () => {
+  const t = await (await entrada(base())).text();
   assert.ok(!t.includes(SECRETO));
-  for (const n of piezasDeEpoca(EPOCA)) {
-    const f = await fragmentoDe(SECRETO, n);
-    assert.ok(!t.includes(f), `el manifiesto filtro el fragmento de ${nombrePieza(n)}`);
-  }
 });
-test('W8 sin llave da 401', async () => {
-  assert.equal((await pedir('', base())).status, 401);
-});
-test('W9 llave de 63 hex da 401, no 403', async () => {
-  assert.equal((await pedir('?k=' + 'a'.repeat(63), base())).status, 401);
-});
-test('W10 llave con caracter no hex da 401', async () => {
-  assert.equal((await pedir('?k=' + 'g'.repeat(64), base())).status, 401);
-});
-test('W11 llave hex en MAYUSCULAS se rechaza (formato canonico)', async () => {
-  assert.equal((await pedir('?k=' + 'A'.repeat(64), base())).status, 401);
-});
-test('W12 llave bien formada pero incorrecta da 403', async () => {
-  assert.equal((await pedir('?k=' + 'b'.repeat(64), base())).status, 403);
-});
-test('W13 llave correcta entrega 200, NO un error (los errores no se facturan)', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const r = await pedir(`?k=${k}&l=python&s=${b64('print(1)')}`, base());
-  assert.equal(r.status, 200);
-});
-test('W14 la epoca de gracia (anterior) sigue siendo valida', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA - 1);
-  const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, base());
-  assert.equal(r.status, 200);
-});
-test('W15 dos epocas atras YA NO vale', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA - 2);
-  assert.equal((await pedir(`?k=${k}&l=python`, base())).status, 403);
-});
-test('W16 la llave de otro secreto no sirve', async () => {
-  const k = await llaveDeEpoca('otro'.repeat(16), EPOCA);
-  assert.equal((await pedir(`?k=${k}&l=python`, base())).status, 403);
-});
-test('W17 lenguaje ausente da 400 (despues de validar llave)', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  assert.equal((await pedir(`?k=${k}`, base())).status, 400);
-});
-test('W18 lenguaje no soportado da 400', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  assert.equal((await pedir(`?k=${k}&l=rust`, base())).status, 400);
-});
-test('W19 fuente mayor a 8192 B da 413', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const r = await pedir(`?k=${k}&l=python&s=${b64('x'.repeat(8193))}`, base());
-  assert.equal(r.status, 413);
-});
-test('W20 fuente de exactamente 8192 B pasa', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const r = await pedir(`?k=${k}&l=python&s=${b64('x'.repeat(8192))}`, base());
-  assert.equal(r.status, 200);
-});
-test('W21 MOLINETE: sin proveedor NO exige contador y entrega 200 facturable', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, base());
-  assert.equal(r.status, 200);
-  assert.match(await r.text(), /ENTREGA DE CONTENIDO/);
-});
-test('W22 CONTRA-CASO: con proveedor SI exige contador y da 503', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const env = base({ SALA_URL: 'https://sala', SALA_TOKEN: 'tok' });
-  const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, env);
-  assert.equal(r.status, 503);
-  assert.match(await r.text(), /presupuesto_no_medido/);
-});
-test('W23 con contador pero sin techo, presupuesto NO MEDIDO', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const env = base({ SALA_URL: 'https://s', SALA_TOKEN: 't', CONTADOR: { get: async () => '0', put: async () => {} } });
-  const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, env);
-  assert.equal(r.status, 503);
-  assert.match(await r.text(), /PRESUPUESTO_MAX/);
-});
-test('W24 presupuesto agotado bloquea la ejecucion', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const env = base({ SALA_URL: 'https://s', SALA_TOKEN: 't', PRESUPUESTO_MAX: 10,
-    CONTADOR: { get: async () => '10', put: async () => {} },
-    __fetch: () => { throw new Error('no deberia ejecutar'); } });
-  const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, env);
-  assert.equal(r.status, 503);
-  assert.match(await r.text(), /agotado/);
-});
-test('W25 con todo configurado ejecuta y cuenta el gasto', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  let guardado = null;
-  const env = base({ SALA_URL: 'https://s', SALA_TOKEN: 't', PRESUPUESTO_MAX: 10,
-    CONTADOR: { get: async () => '3', put: async (_, v) => { guardado = v; } },
-    __fetch: async () => ({ ok: true, text: async () => 'salida real' }) });
-  const r = await pedir(`?k=${k}&l=python&s=${b64('print(1)')}`, env);
-  assert.equal(r.status, 200);
-  assert.equal(await r.text(), 'salida real');
-  assert.equal(guardado, '4');
-});
-test('W26 TASA ausente es NO MEDIDO y falla cerrado', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const env = { SECRETO, __ahora: AHORA };
-  const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, env);
+test('P14 TASA ausente es NO MEDIDO y falla cerrado', async () => {
+  const r = await entrada({ SECRETO, __ahora: AHORA });
   assert.equal(r.status, 503);
   assert.match(await r.text(), /tasa_no_medida/);
 });
-test('W27 tasa excedida da 429', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, base({ TASA: tasaNo }));
+test('P15 tasa excedida da 429', async () => {
+  const r = await entrada(base({ TASA: { limit: async () => ({ success: false }) } }));
   assert.equal(r.status, 429);
 });
-test('W28 la tasa se cobra DESPUES de validar la llave (no la gasta un anonimo)', async () => {
-  let llamadas = 0;
-  const env = base({ TASA: { limit: async () => { llamadas++; return { success: true }; } } });
-  await pedir('?k=' + 'b'.repeat(64), env);
-  assert.equal(llamadas, 0);
-});
-test('W29 s invalido en base64 no tira 500', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const r = await pedir(`?k=${k}&l=python&s=%%%`, base());
-  assert.ok([400, 200].includes(r.status), `status inesperado ${r.status}`);
-});
-test('W30 ninguna respuesta se cachea', async () => {
-  const r = await worker.fetch(new Request('https://p/puerta/v1/manifiesto'), base());
-  assert.equal(r.headers.get('cache-control'), 'no-store');
-});
-test('W31 fragmento son 16 hex', async () => {
-  const f = await fragmentoDe(SECRETO, 1);
-  assert.match(f, /^[0-9a-f]{16}$/);
-});
-test('W32 fragmento es ESTABLE en el tiempo (por eso puede ir en un archivo)', async () => {
-  assert.equal(await fragmentoDe(SECRETO, 7), await fragmentoDe(SECRETO, 7));
-});
-test('W33 fragmentos distintos por pieza', async () => {
-  const s = new Set();
-  for (let n = 1; n <= 12; n++) s.add(await fragmentoDe(SECRETO, n));
-  assert.equal(s.size, 12);
-});
-test('W34 la llave son 64 hex', async () => {
-  assert.match(await llaveDeEpoca(SECRETO, EPOCA), /^[0-9a-f]{64}$/);
-});
-test('W35 la llave cambia de epoca a epoca', async () => {
-  assert.notEqual(await llaveDeEpoca(SECRETO, EPOCA), await llaveDeEpoca(SECRETO, EPOCA + 1));
-});
-test('W36 la llave es la concatenacion de los 4 fragmentos en orden', async () => {
-  const esperada = (await Promise.all(piezasDeEpoca(EPOCA).map(n => fragmentoDe(SECRETO, n)))).join('');
-  assert.equal(await llaveDeEpoca(SECRETO, EPOCA), esperada);
-});
-test('W37 el ORDEN importa: fragmentos correctos mal ordenados no valen', async () => {
-  const fr = await Promise.all(piezasDeEpoca(EPOCA).map(n => fragmentoDe(SECRETO, n)));
-  const desordenada = [fr[1], fr[0], fr[2], fr[3]].join('');
-  assert.equal((await pedir(`?k=${desordenada}&l=python`, base())).status, 403);
-});
-test('W38 igualCte true para iguales, false para distintas', () => {
-  assert.equal(igualCte('abc', 'abc'), true);
-  assert.equal(igualCte('abc', 'abd'), false);
-});
-test('W39 igualCte false si difieren en largo', () => {
-  assert.equal(igualCte('abc', 'ab'), false);
-});
-test('W40 igualCte no cortocircuita en el primer caracter', () => {
-  assert.equal(igualCte('zbc', 'abc'), false);
-  assert.equal(igualCte('abz', 'abc'), false);
-});
 
-// --- La entrega de la fase molinete: el 200 que reemplazo al 501 ----------
-// Existen porque un 501 no se factura (Cloudflare Pay Per Crawl FAQ,
-// verificado 2026-08-22) y por lo tanto la fase molinete no cobraba nada.
-
-test('W41 el 200 declara que NO se ejecuto, y dice por que', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const r = await pedir(`?k=${k}&l=python&s=${b64('print(1)')}`, base());
+// ---- PASO 2: el documento --------------------------------------------------
+test('P16 la direccion que dio la entrada entrega 200 con el documento', async () => {
+  const env = base();
+  const d = await primeraDireccion(env);
+  const r = await get(d, env);
+  assert.equal(r.status, 200);
   const t = await r.text();
-  assert.match(t, /ejecutada: no/);
-  assert.match(t, /no hay sala de ejecucion conectada/);
-});
-test('W42 el 200 NO afirma haber ejecutado nada', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const t = await (await pedir(`?k=${k}&l=python&s=${b64('print(1)')}`, base())).text();
-  assert.equal(/ejecutada: (si|yes)/i.test(t), false);
-});
-test('W43 el 200 lleva contenido licenciado de verdad, no un cartel', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const t = await (await pedir(`?k=${k}&l=python&s=${b64('x')}`, base())).text();
   assert.match(t, /TRES ESTADOS, NO DOS/);
-  assert.ok(t.length > 1200, `cuerpo demasiado corto: ${t.length} B`);
+  assert.ok(t.length > 900, `documento corto: ${t.length} B`);
 });
-test('W44 el 200 lleva la atribucion PEGADA, no en otra URL', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const t = await (await pedir(`?k=${k}&l=python&s=${b64('x')}`, base())).text();
+test('P17 el documento lleva la atribucion PEGADA', async () => {
+  const env = base();
+  const t = await (await get(await primeraDireccion(env), env)).text();
   assert.match(t, /Jorge Abraham Mendieta/);
   assert.match(t, /license\.xml/);
   assert.match(t, /creativecommons\.org\/licenses\/by\/4\.0/);
   assert.match(t, /ENTRENAMIENTO DE MODELOS: es un permiso distinto/);
 });
-test('W45 el 200 anuncia la licencia por cabecera Link (RSL 1.0 seccion 4)', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, base());
-  assert.match(r.headers.get('link'), /rel="license"/);
-  assert.match(r.headers.get('link'), /application\/rsl\+xml/);
+test('P18 el documento declara su recurso y su epoca en cabeceras', async () => {
+  const env = base();
+  const r = await get(await primeraDireccion(env), env);
+  assert.equal(r.headers.get('x-icca-recurso'), 'tres-estados');
+  assert.equal(r.headers.get('x-icca-epoca'), String(EPOCA));
+  assert.equal(r.headers.get('x-icca-gracia'), 'no');
 });
-test('W46 el informe de la fuente es correcto y determinista', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const src = 'a=1\nb=2\nprint(a+b)';
-  const t = await (await pedir(`?k=${k}&l=python&s=${b64(src)}`, base())).text();
-  assert.match(t, new RegExp(`bytes:\\s+${src.length}`));
-  assert.match(t, /lineas:\s+3/);
-  assert.match(t, /sha256:\s+[0-9a-f]{64}/);
+test('P19 los TRES recursos se pueden pedir con su direccion', async () => {
+  const env = base();
+  const t = await (await entrada(env)).text();
+  const urls = [...t.matchAll(/direccion: (\S+)/g)].map(m => m[1].replace(ORIGEN, ''));
+  assert.equal(urls.length, 3);
+  for (const u of urls) assert.equal((await get(u, env)).status, 200);
 });
-test('W47 el sha256 del informe es el de la fuente real', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const src = 'print(1)';
-  const esperado = await sha256Hex(src);
-  const t = await (await pedir(`?k=${k}&l=python&s=${b64(src)}`, base())).text();
-  assert.ok(t.includes(esperado), 'el sha256 publicado no es el de la fuente');
+test('P20 sin token da 403 y apunta a la entrada', async () => {
+  const r = await get('/metodo/tres-estados', base());
+  assert.equal(r.status, 403);
+  assert.match(await r.text(), /puerta\/v1\/entrada/);
+  assert.equal(r.headers.get('x-icca-motivo'), 'invalida');
 });
-test('W48 el 200 registra el operador declarado en Forwarded', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const req = new Request(`https://p/puerta/v1/ejecutar?k=${k}&l=python&s=${b64('x')}`,
-    { headers: { forwarded: 'for="openai";use="reference"' } });
-  const r = await worker.fetch(req, base());
+test('P21 token inventado da 403 invalida', async () => {
+  const r = await get(`/metodo/tres-estados?e=${EPOCA}&t=${'a'.repeat(32)}`, base());
+  assert.equal(r.status, 403);
+  assert.equal(r.headers.get('x-icca-motivo'), 'invalida');
+});
+test('P22 un documento fuera de la allowlist da 404, no 403', async () => {
+  // Importa la diferencia: 404 dice "no existe", 403 diria "existe y no
+  // podes", que filtraria la existencia de rutas.
+  const r = await get(`/metodo/../secreto?t=${'a'.repeat(32)}`, base());
+  assert.equal(r.status, 404);
+});
+test('P23 la epoca de gracia sigue sirviendo, y se marca', async () => {
+  const env = base();
+  const t = await firmar(SECRETO, 'tres-estados', EPOCA - 1);
+  const r = await get(`/metodo/tres-estados?e=${EPOCA - 1}&t=${t}`, env);
   assert.equal(r.status, 200);
+  assert.equal(r.headers.get('x-icca-gracia'), 'si');
+});
+test('P24 EL EVENTO QUE IMPORTA: una direccion cacheada vence y da 410', async () => {
+  // Este test es el corazon del rediseno. Si una direccion no venciera, el
+  // agente entraria directo para siempre y la medicion se perderia despues de
+  // la primera visita.
+  const env = base();
+  const t = await firmar(SECRETO, 'tres-estados', EPOCA - 2);
+  const r = await get(`/metodo/tres-estados?e=${EPOCA - 2}&t=${t}`, env);
+  assert.equal(r.status, 410);
+  assert.equal(r.headers.get('x-icca-motivo'), 'vencida');
+  const cuerpo = await r.text();
+  assert.match(cuerpo, /vencida/);
+  assert.match(cuerpo, /puerta\/v1\/entrada/);
+});
+test('P25 vencida e invalida NO son el mismo estado', async () => {
+  const env = base();
+  const vieja = await firmar(SECRETO, 'tres-estados', EPOCA - 3);
+  const rv = await get(`/metodo/tres-estados?t=${vieja}`, env);
+  const ri = await get(`/metodo/tres-estados?t=${'c'.repeat(32)}`, env);
+  assert.equal(rv.status, 410);
+  assert.equal(ri.status, 403);
+  assert.notEqual(rv.headers.get('x-icca-motivo'), ri.headers.get('x-icca-motivo'));
+});
+test('P26 una direccion vencida NO entrega el documento', async () => {
+  const env = base();
+  const t = await firmar(SECRETO, 'tres-estados', EPOCA - 5);
+  const cuerpo = await (await get(`/metodo/tres-estados?t=${t}`, env)).text();
+  assert.ok(!cuerpo.includes('grep -c'), 'el 410 filtro contenido del documento');
+});
+
+// ---- identidad -------------------------------------------------------------
+test('P27 el operador declarado se registra en la entrada', async () => {
+  const r = await entrada(base(), { forwarded: 'for="openai";use="reference"' });
   assert.equal(r.headers.get('x-icca-operador'), 'openai');
   assert.equal(r.headers.get('x-icca-uso'), 'reference');
   assert.match(await r.text(), /OPERADOR DECLARADO: openai/);
 });
-test('W49 sin Forwarded queda SIN DECLARAR, que no es lo mismo que anonimo', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const r = await pedir(`?k=${k}&l=python&s=${b64('x')}`, base());
+test('P28 sin Forwarded queda SIN DECLARAR, que no es lo mismo que anonimo', async () => {
+  const r = await entrada(base());
   assert.equal(r.headers.get('x-icca-operador'), 'sin_declarar');
   assert.equal(r.headers.get('x-icca-uso'), 'sin_declarar');
 });
-test('W50 un uso desconocido NO se acepta como valido', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const req = new Request(`https://p/puerta/v1/ejecutar?k=${k}&l=python&s=${b64('x')}`,
-    { headers: { forwarded: 'for="raro";use="todo"' } });
-  const r = await worker.fetch(req, base());
+test('P29 un uso desconocido no se acepta como valido', async () => {
+  const r = await entrada(base(), { forwarded: 'for="raro";use="todo"' });
   assert.equal(r.headers.get('x-icca-uso'), 'declarado_no_reconocido');
   assert.match(await r.text(), /no reconocido \(todo\)/);
 });
-test('W51 el 200 dice QUE piezas hubo que leer para armar la llave', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const t = await (await pedir(`?k=${k}&l=python&s=${b64('x')}`, base())).text();
-  for (const n of piezasDeEpoca(EPOCA)) assert.ok(t.includes(nombrePieza(n)));
+test('P30 CONTRA-CASO: una direccion firmada para un operador no sirve a otro', async () => {
+  const env = base();
+  const h = { forwarded: 'for="openai";use="reference"' };
+  const d = await primeraDireccion(env, h);
+  assert.equal((await get(d, env, h)).status, 200);
+  const otro = await get(d, env, { forwarded: 'for="scraper";use="full"' });
+  assert.equal(otro.status, 403);
 });
-test('W52 el 200 NO filtra el secreto ni ningun fragmento', async () => {
-  const k = await llaveDeEpoca(SECRETO, EPOCA);
-  const t = await (await pedir(`?k=${k}&l=python&s=${b64('x')}`, base())).text();
-  assert.ok(!t.includes(SECRETO));
-  for (const n of piezasDeEpoca(EPOCA)) {
-    const f = await fragmentoDe(SECRETO, n);
-    assert.ok(!t.includes(f), `el recibo filtro el fragmento de ${nombrePieza(n)}`);
-  }
+test('P31 una direccion sin operador no se puede usar declarando uno', async () => {
+  const env = base();
+  const d = await primeraDireccion(env);
+  assert.equal((await get(d, env)).status, 200);
+  assert.equal((await get(d, env, { forwarded: 'for="otro"' })).status, 403);
 });
-test('W53 CONTRA-CASO: el 200 es de la fase molinete, no de cualquier error', async () => {
-  const r = await pedir('?k=' + 'b'.repeat(64) + '&l=python', base());
-  assert.equal(r.status, 403);
-  assert.ok(!(await r.text()).includes('TRES ESTADOS'));
+test('P32 el documento tambien registra al operador', async () => {
+  const env = base();
+  const h = { forwarded: 'for="anthropic";use="immediate"' };
+  const r = await get(await primeraDireccion(env, h), env, h);
+  assert.equal(r.headers.get('x-icca-operador'), 'anthropic');
+  assert.equal(r.headers.get('x-icca-uso'), 'immediate');
+});
+
+// ---- la sala, que sigue muerta y lo dice ----------------------------------
+test('P33 la ruta de ejecucion responde 200 y no un error', async () => {
+  const r = await get('/puerta/v1/ejecutar', base());
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('x-icca-ejecutada'), 'no');
+  assert.match(await r.text(), /no esta conectada/);
+});
+test('P34 con sala configurada pero sin contador, presupuesto NO MEDIDO', async () => {
+  const r = await get('/puerta/v1/ejecutar', base({ SALA_URL: 'https://s', SALA_TOKEN: 't' }));
+  assert.equal(r.status, 503);
+  assert.match(await r.text(), /presupuesto_no_medido/);
 });
