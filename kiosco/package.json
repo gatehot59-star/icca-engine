@@ -1,0 +1,24 @@
+{
+  "name": "kiosco-icca-engine",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Kiosco MCP de icca-engine.com. Herramientas gratis, sin wallet: el cobro vive en la pagina.",
+  "author": "Jorge Abraham Mendieta",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:mcp": "node --test test-integracion/*.test.mjs",
+    "sabotaje": "bash tools/sabotaje.sh",
+    "verificar": "npm test && bash tools/sabotaje.sh",
+    "dev": "wrangler dev",
+    "deploy": "npm run verificar && wrangler deploy"
+  },
+  "dependencies": {
+    "agents": "0.21.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "wrangler": "4.125.0"
+  }
+}

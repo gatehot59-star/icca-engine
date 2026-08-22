@@ -1,0 +1,28 @@
+{
+  // Kiosco MCP de icca-engine.com
+  //
+  // VERIFICADO EN VIVO 2026-08-22 en el registry de npm: agents 0.21.0 exporta
+  // "agents/mcp/server" y pide como peer @modelcontextprotocol/server 2.0.0 y
+  // zod ^4. Todos los pins son exactos, sin rangos.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kiosco-icca-engine",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-08-21",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+
+  "routes": [
+    { "pattern": "kiosco.icca-engine.com", "custom_domain": true }
+  ],
+
+  // Vacio A PROPOSITO, y aca es mas fuerte que de costumbre: este kiosco NO
+  // tiene secretos, NO tiene wallet y NO cobra. No hay nada que configurar.
+  // El cobro de este proyecto vive en la pagina, no aca.
+  "vars": {},
+
+  "observability": { "enabled": true }
+
+  // NO se declara un KV: createMcpHandler crea un servidor nuevo por request y
+  // este kiosco no guarda estado entre llamadas. Si alguna vez hiciera falta
+  // contar algo, va en KV o D1, nunca en memoria del modulo.
+}
