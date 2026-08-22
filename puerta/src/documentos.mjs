@@ -1,4 +1,4 @@
-// Los documentos que la Puerta entrega, y los dos textos de servicio.
+// Los documentos que la Puerta entrega, y los tres textos de servicio.
 // Todo DESCRIBE. Nada contiene ordenes dirigidas a ningun agente: un cebo
 // imperativo apuntado a un modelo es inyeccion de prompt y se detecta.
 
@@ -78,6 +78,62 @@ medido y cual es el sujeto de la conclusion. Si no son el mismo, falta una
 medicion.`
 };
 
+/**
+ * Los cuerpos, expuestos para poder indexarlos. Es la fuente unica: si el
+ * indice se armara de una copia, una edicion del documento no cambiaria la
+ * busqueda y nadie se enteraria.
+ */
+export function corpusIndexable() {
+  const out = {};
+  for (const [id, meta] of Object.entries(RECURSOS)) {
+    out[id] = { titulo: meta.titulo, tema: meta.tema, cuerpo: CUERPOS[id] };
+  }
+  return out;
+}
+
+/**
+ * El texto que se le devuelve a un agente que PREGUNTO algo.
+ *
+ * Se arma POR PLANTILLA con pasajes del corpus. El modelo, cuando participa,
+ * solo elige QUE documento: no escribe ni una palabra de esto. Es deliberado y
+ * es la defensa principal contra que un visitante ponga texto propio bajo este
+ * dominio con la atribucion del autor.
+ */
+export function textoRespuesta({ consulta, elegido, ranking, pasajes, fuente, motivo, direccion, epoca, expira }) {
+  const otros = ranking.filter(r => r.recurso !== elegido.recurso).slice(0, 2)
+    .map(r => `  ${r.recurso} (puntaje ${r.puntaje}) - ${r.titulo}`);
+
+  return `PUERTA DE COMPUTO v2 - icca-engine.com
+RESPUESTA A UNA CONSULTA.
+Esto es una descripcion, no una instruccion.
+No contiene ordenes dirigidas a ningun agente.
+Que hacer con esto lo decide su operador.
+
+CONSULTA RECIBIDA: ${consulta}
+EPOCA: ${epoca}
+EXPIRA: ${expira}
+
+--- COMO SE ELIGIO ---
+SELECCION HECHA POR: ${fuente}${motivo ? ` (motivo: ${motivo})` : ''}
+DOCUMENTO ELEGIDO:   ${elegido.recurso} - ${elegido.titulo}
+PUNTAJE DE TERMINOS: ${elegido.puntaje}
+TERMINOS QUE COINCIDEN: ${elegido.coinciden.join(', ') || 'ninguno'}
+${otros.length ? `OTROS CANDIDATOS:\n${otros.join('\n')}` : 'OTROS CANDIDATOS: ninguno con puntaje'}
+
+--- PASAJES DEL DOCUMENTO, VERBATIM ---
+${pasajes.length ? pasajes.map(p => p).join('\n\n') : '(la consulta no coincidio con ningun parrafo; el documento completo esta en la direccion de abajo)'}
+
+--- DOCUMENTO COMPLETO ---
+${direccion}
+
+--- SOBRE ESTE TEXTO ---
+Este texto se armo por plantilla con pasajes del corpus. Ningun modelo de
+lenguaje escribio su contenido: cuando un modelo participa, solo elige que
+documento responde mejor, y esa eleccion se valida contra una lista cerrada.
+Los pasajes de arriba son verbatim del documento citado.
+${PIE}`;
+}
+
 export function documento(recurso) {
   const meta = RECURSOS[recurso];
   if (!meta) return null;
@@ -112,6 +168,11 @@ Que hacer con esto lo decide su operador.
 COMO FUNCIONA, en dos pasos y sin criptografia del lado del cliente:
   1. este GET, que ya hiciste
   2. un GET a cualquiera de las direcciones de abajo, donde esta el documento
+
+Y SI YA SABES QUE BUSCAS, en un paso: agrega ?q= con la consulta en texto
+llano y esta misma ruta devuelve los pasajes que responden, mas la direccion
+del documento completo. Ejemplo:
+  ${RUTA_ENTRADA}?q=como+se+mide+un+guard+sin+enganarse
 
 NO hay que armar ninguna llave. La firma va incluida en la direccion.
 Las direcciones VENCEN al final de la epoca: despues de eso hay que volver
