@@ -13,6 +13,12 @@
 // La pregunta concreta que responde, y que ninguna lectura de documentacion
 // podia cerrar: si createMcpHandler (que exige @modelcontextprotocol/server
 // 2.0.0) funciona con el servidor que arma crearServidor().
+//
+// YA COBRO. En el run 8 seis de los doce tests de aca se pusieron rojos con
+// 403 Missing Host header, sobre un servidor que localmente daba 74 tests
+// verdes. El fallo era del banco de pruebas y no del servidor, y aun asi el
+// hallazgo valio: mostro que allowedHostnames no estaba medido en ninguna
+// direccion. M13 y M14 existen por eso.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -20,16 +26,29 @@ const mod = await import('../src/index.mjs');
 const worker = mod.default;
 
 const ORIGEN = 'https://kiosco.icca-engine.com';
+const HOST = 'kiosco.icca-engine.com';
 const ctx = { waitUntil() {}, passThroughOnException() {} };
 
-/** Un POST JSON-RPC al endpoint MCP, como lo haria un cliente real. */
-async function rpc(metodo, params, id = 1) {
+/**
+ * Un POST JSON-RPC al endpoint MCP, como lo haria un cliente real.
+ *
+ * EL HEADER HOST VA EXPLICITO Y NO ES OPCIONAL. El handler valida el Host
+ * contra allowedHostnames y responde 403 si no lo encuentra. El Request de Node
+ * no lo setea solo: normalmente lo agrega la capa de red al enviar, y aca no
+ * hay red porque se invoca worker.fetch directo. Sin esta linea, los seis tests
+ * que usan el protocolo fallan con "Missing Host header" y el diagnostico
+ * apunta al servidor, que esta bien.
+ */
+async function rpc(metodo, params, id = 1, host = HOST) {
+  const headers = {
+    'content-type': 'application/json',
+    accept: 'application/json, text/event-stream'
+  };
+  if (host !== null) headers.host = host;
+
   const req = new Request(`${ORIGEN}/mcp`, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      accept: 'application/json, text/event-stream'
-    },
+    headers,
     body: JSON.stringify({ jsonrpc: '2.0', id, method: metodo, params })
   });
   const res = await worker.fetch(req, {}, ctx);
@@ -37,18 +56,50 @@ async function rpc(metodo, params, id = 1) {
   return { status: res.status, tipo: res.headers.get('content-type') || '', cuerpo };
 }
 
-/** Extrae el objeto JSON-RPC, venga como JSON puro o dentro de un SSE. */
-function leerRpc({ cuerpo }) {
+/**
+ * Extrae el objeto JSON-RPC, venga como JSON puro o dentro de un SSE.
+ *
+ * Si la respuesta trae un error del protocolo en vez de un result, se dice ASI,
+ * con el codigo y el mensaje. La version anterior devolvia el objeto y el test
+ * moria despues con "Cannot read properties of undefined (reading 'content')",
+ * que es un sintoma derivado y manda a buscar el problema al lugar equivocado.
+ */
+function leerRpc({ status, cuerpo }) {
   const t = cuerpo.trim();
-  if (t.startsWith('{')) return JSON.parse(t);
-  for (const linea of t.split('\n')) {
-    const l = linea.trim();
-    if (l.startsWith('data:')) {
-      const d = l.slice(5).trim();
-      if (d.startsWith('{')) return JSON.parse(d);
+  let objeto = null;
+
+  if (t.startsWith('{')) {
+    objeto = JSON.parse(t);
+  } else {
+    for (const linea of t.split('\n')) {
+      const l = linea.trim();
+      if (l.startsWith('data:')) {
+        const d = l.slice(5).trim();
+        if (d.startsWith('{')) { objeto = JSON.parse(d); break; }
+      }
     }
   }
-  throw new Error('no se encontro un objeto JSON-RPC en la respuesta: ' + t.slice(0, 300));
+
+  if (!objeto) {
+    throw new Error(
+      `no se encontro un objeto JSON-RPC en la respuesta (status ${status}): ` +
+      t.slice(0, 300)
+    );
+  }
+  return objeto;
+}
+
+/** Falla con el error del protocolo a la vista, en vez de un TypeError. */
+function resultado(respuesta) {
+  const j = leerRpc(respuesta);
+  if (j.error) {
+    assert.fail(
+      `el protocolo devolvio error ${j.error.code}: ${j.error.message} ` +
+      `(status HTTP ${respuesta.status})`
+    );
+  }
+  assert.ok(j.result, `sin result y sin error (status ${respuesta.status})`);
+  return j.result;
 }
 
 test('M1 el modulo carga con los paquetes reales instalados', () => {
@@ -73,28 +124,26 @@ test('M3 initialize responde y declara capacidad de herramientas', async () => {
     clientInfo: { name: 'test-integracion', version: '1.0.0' }
   });
   assert.equal(r.status, 200, `status ${r.status}: ${r.cuerpo.slice(0, 300)}`);
-  const j = leerRpc(r);
-  assert.equal(j.error, undefined, `error del protocolo: ${JSON.stringify(j.error)}`);
-  assert.ok(j.result, 'sin result');
-  assert.ok(j.result.capabilities, 'sin capabilities');
-  assert.ok(j.result.capabilities.tools, 'el servidor no declara tools');
-  assert.equal(j.result.serverInfo.name, 'icca-engine-metodo');
+  const result = resultado(r);
+  assert.ok(result.capabilities, 'sin capabilities');
+  assert.ok(result.capabilities.tools, 'el servidor no declara tools');
+  assert.equal(result.serverInfo.name, 'icca-engine-metodo');
 });
 
 test('M4 tools/list expone las TRES herramientas con su schema', async () => {
-  const j = leerRpc(await rpc('tools/list', {}, 2));
-  assert.equal(j.error, undefined, JSON.stringify(j.error));
-  const nombres = j.result.tools.map(t => t.name).sort();
+  const result = resultado(await rpc('tools/list', {}, 2));
+  const nombres = result.tools.map(t => t.name).sort();
   assert.deepEqual(nombres, ['buscar_metodo', 'donde_esta', 'listar_metodo']);
-  for (const t of j.result.tools) {
+  for (const t of result.tools) {
     assert.ok(t.description && t.description.length > 40, `${t.name}: descripcion corta`);
     assert.ok(t.inputSchema, `${t.name}: sin inputSchema`);
   }
 });
 
 test('M5 la descripcion publicada es la que hace descubrible al kiosco', async () => {
-  const j = leerRpc(await rpc('tools/list', {}, 3));
-  const buscar = j.result.tools.find(t => t.name === 'buscar_metodo');
+  const result = resultado(await rpc('tools/list', {}, 3));
+  const buscar = result.tools.find(t => t.name === 'buscar_metodo');
+  assert.ok(buscar, 'no se publico buscar_metodo');
   assert.ok(buscar.description.length > 300, `${buscar.description.length} caracteres`);
   for (const term of ['verificacion', 'medicion', 'tests']) {
     assert.ok(buscar.description.includes(term), `no menciona ${term}`);
@@ -102,13 +151,12 @@ test('M5 la descripcion publicada es la que hace descubrible al kiosco', async (
 });
 
 test('M6 tools/call de buscar_metodo devuelve el anzuelo por el protocolo', async () => {
-  const j = leerRpc(await rpc('tools/call', {
+  const result = resultado(await rpc('tools/call', {
     name: 'buscar_metodo',
     arguments: { consulta: 'un control que no reporta su ignorancia' }
   }, 4));
-  assert.equal(j.error, undefined, JSON.stringify(j.error));
-  assert.equal(j.result.isError, undefined);
-  const texto = j.result.content[0].text;
+  assert.equal(result.isError, undefined);
+  const texto = result.content[0].text;
   assert.match(texto, /FRAGMENTO VERBATIM/);
   assert.match(texto, /tres-estados/);
   assert.match(texto, /Quedan \d+ parrafos/);
@@ -116,9 +164,8 @@ test('M6 tools/call de buscar_metodo devuelve el anzuelo por el protocolo', asyn
 });
 
 test('M7 tools/call sin argumentos devuelve el catalogo, no un error', async () => {
-  const j = leerRpc(await rpc('tools/call', { name: 'listar_metodo', arguments: {} }, 5));
-  assert.equal(j.error, undefined, JSON.stringify(j.error));
-  assert.match(j.result.content[0].text, /DOCUMENTOS/);
+  const result = resultado(await rpc('tools/call', { name: 'listar_metodo', arguments: {} }, 5));
+  assert.match(result.content[0].text, /DOCUMENTOS/);
 });
 
 test('M8 el schema RECHAZA una consulta mas larga que el limite', async () => {
@@ -149,7 +196,9 @@ test('M10 una herramienta inexistente da error, no 500', async () => {
 });
 
 test('M11 la raiz devuelve la tarjeta legible con 200', async () => {
-  const res = await worker.fetch(new Request(ORIGEN + '/'), {}, ctx);
+  const res = await worker.fetch(
+    new Request(ORIGEN + '/', { headers: { host: HOST } }), {}, ctx
+  );
   assert.equal(res.status, 200);
   assert.match(res.headers.get('link') || '', /rel="license"/);
   const t = await res.text();
@@ -161,14 +210,31 @@ test('M11 la raiz devuelve la tarjeta legible con 200', async () => {
 test('M12 ninguna respuesta del protocolo filtra el corpus completo', async () => {
   const { IDS } = await import('../src/corpus.mjs');
   const { parrafos } = await import('../src/busqueda.mjs');
-  const j = leerRpc(await rpc('tools/call', {
+  const result = resultado(await rpc('tools/call', {
     name: 'buscar_metodo',
     arguments: { consulta: 'medicion control error codigo caso regla metodo' }
   }, 9));
-  const texto = j.result.content[0].text;
+  const texto = result.content[0].text;
   for (const id of IDS) {
     const ps = parrafos(id);
     const dados = ps.filter(p => texto.includes(p)).length;
     assert.ok(dados < ps.length, `${id}: se entrego completo por el protocolo`);
   }
+});
+
+// ---- El guard de Host, medido a proposito -----------------------------------
+// Estos dos existen por el fallo del run 8: seis tests se estaban estrellando
+// contra allowedHostnames sin que ninguno lo estuviera probando. Un guard que
+// nadie prueba a proposito es un guard que puede desaparecer sin que nada se
+// ponga rojo.
+
+test('M13 un Host que no esta en la lista se RECHAZA', async () => {
+  const r = await rpc('tools/list', {}, 10, 'sitio-ajeno.example');
+  assert.equal(r.status, 403, `un Host ajeno recibio status ${r.status}`);
+});
+
+test('M14 sin Host tambien se rechaza, y el motivo se dice', async () => {
+  const r = await rpc('tools/list', {}, 11, null);
+  assert.equal(r.status, 403, `sin Host recibio status ${r.status}`);
+  assert.match(r.cuerpo, /Host/i, 'el rechazo no explica que falta el Host');
 });
