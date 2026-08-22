@@ -1,0 +1,33 @@
+{
+  // Puerta de Computo v1 - icca-engine.com
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "puerta-de-computo",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-08-21",
+  "workers_dev": true,
+
+  "routes": [
+    { "pattern": "puerta.icca-engine.com", "custom_domain": true }
+  ],
+
+  // SINTAXIS VERIFICADA contra developers.cloudflare.com/workers/runtime-apis/
+  // bindings/rate-limit/ (doc del 2026-04-23). NO usar "unsafe.bindings":
+  // esa forma es vieja y deja el freno INERTE sin avisar.
+  // "period" acepta SOLO 10 o 60. "namespace_id" va string aunque sea entero.
+  // Exige wrangler >= 4.36.0.
+  "ratelimits": [
+    { "name": "TASA", "namespace_id": "1001", "simple": { "limit": 20, "period": 60 } }
+  ],
+
+  // Vacio A PROPOSITO: cero secretos en el arbol. SECRETO va por
+  // `wrangler secret put`, generado en la maquina de su dueno.
+  "vars": {},
+
+  "observability": { "enabled": true }
+
+  // FASE C (cuando haya sala conectada), agregar:
+  // "kv_namespaces": [{ "binding": "CONTADOR", "id": "<el id real>" }]
+  //   npx wrangler kv namespace create CONTADOR
+  // y el techo de gasto:
+  //   npx wrangler secret put PRESUPUESTO_MAX
+}
