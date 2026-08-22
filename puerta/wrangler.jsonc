@@ -1,5 +1,5 @@
 {
-  // Puerta de Computo v1 - icca-engine.com
+  // Puerta de Computo v2 - icca-engine.com
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "puerta-de-computo",
   "main": "src/index.mjs",
@@ -19,15 +19,27 @@
     { "name": "TASA", "namespace_id": "1001", "simple": { "limit": 20, "period": 60 } }
   ],
 
+  // Workers AI. VERIFICADO EN VIVO 2026-08-22 en
+  // developers.cloudflare.com/workers-ai/get-started/workers-wrangler/
+  // Queda disponible en env.AI. Cuota gratis: 10.000 neuronas por dia, reset
+  // 00:00 UTC.
+  //
+  // La puerta funciona SIN esto: la busqueda por terminos es el piso y la IA
+  // solo mejora la seleccion. Y sin el KV CONTADOR el modelo NO se invoca:
+  // gastar sin poder contar es la definicion de no medido.
+  "ai": { "binding": "AI" },
+
   // Vacio A PROPOSITO: cero secretos en el arbol. SECRETO va por
   // `wrangler secret put`, generado en la maquina de su dueno.
   "vars": {},
 
   "observability": { "enabled": true }
 
-  // FASE C (cuando haya sala conectada), agregar:
-  // "kv_namespaces": [{ "binding": "CONTADOR", "id": "<el id real>" }]
+  // PARA HABILITAR LA IA, dos cosas mas:
   //   npx wrangler kv namespace create CONTADOR
-  // y el techo de gasto:
+  //   -> "kv_namespaces": [{ "binding": "CONTADOR", "id": "el id real" }]
+  //   npx wrangler secret put NEURONAS_MAX      (por ejemplo 8000, de 10.000)
+  //
+  // FASE C, cuando haya sala de ejecucion:
   //   npx wrangler secret put PRESUPUESTO_MAX
 }
